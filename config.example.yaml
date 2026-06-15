@@ -1,0 +1,76 @@
+# config.example.yaml — exemplo comentado do orquestrador (Argos).
+#
+# Copie para config.yaml e ajuste. SEGREDOS NUNCA FICAM AQUI: o arquivo guarda
+# apenas o NOME da variável de ambiente que contém cada token (ex.: token_env).
+# Rodar: ./orchestrator --config config.yaml
+
+# Caminho do arquivo SQLite. Na VM do GCP é um disco persistente (ver
+# design.md §12). Default: ./orchestrator.db
+db_path: "./orchestrator.db"
+
+# Intervalo entre ticks do Scheduler (polling do GitHub). Ex.: "60s", "2m".
+poll_interval: "60s"
+
+# Nº máximo de tarefas (subprocessos `claude`) simultâneas. Default conservador
+# = 1, dado o consumo de RAM do Claude Code CLI.
+max_concurrent_tasks: 1
+
+# Branch base dos PRs (assumida protegida no GitHub — merge é manual).
+base_branch: "main"
+
+# Prefixo das branches criadas pelo agente: agent/issue-{N}.
+agent_branch_prefix: "agent/issue-"
+
+# Lease do lock de processamento por issue. Sugestão: ~2x o timeout de fase.
+lock_lease: "30m"
+
+# ----------------------------------------------------------------------------
+# GitHub — fine-grained PAT com escopo mínimo por repo (Issues RW, Contents RW,
+# Pull requests RW). Ver github_poller.md §2.
+# ----------------------------------------------------------------------------
+github:
+  api_base: "https://api.github.com"
+  token_env: "GITHUB_TOKEN" # nome da env var com o PAT (nunca o token em si)
+  repos:
+    web:    { owner: "minha-org", name: "repo-web" }
+    mobile: { owner: "minha-org", name: "repo-mobile" }
+    hybrid: { owner: "minha-org", name: "repo-hybrid" }
+
+# ----------------------------------------------------------------------------
+# Telegram — webhook (não long polling). Tokens via env. Ver telegram_gateway.md.
+# ----------------------------------------------------------------------------
+telegram:
+  bot_token_env: "TELEGRAM_BOT_TOKEN"        # token do bot
+  secret_token_env: "TELEGRAM_WEBHOOK_SECRET" # segredo do header do webhook
+  webhook_url: "https://argos.exemplo.com/telegram/webhook"
+  allowed_chat_ids: [123456789]              # lista branca de chats autorizados
+  message_format: "html"                     # "html" | "markdownv2"
+
+# ----------------------------------------------------------------------------
+# Modelo — resolução por precedência issue > repo > env > arquivo > default.
+# Ver model_config.md. Aceita aliases do Claude Code (opus, opusplan, sonnet)
+# ou model IDs explícitos (claude-opus-4-5, claude-opus-4-8, ...).
+# ----------------------------------------------------------------------------
+model:
+  default: "claude-opus-4-5"   # opusplan (default do projeto)
+  context_window: 200000       # janela do modelo default (tokens)
+  context_threshold: 0.65      # limiar de retomada por uso de contexto (0..1)
+
+  # Janela de contexto por modelo (id/alias). Declarada aqui (não hardcoded)
+  # para acompanhar modelos novos sem recompilar. CONFIRMAR valores reais.
+  windows:
+    claude-opus-4-5: 200000
+    claude-opus-4-8: 1000000
+    claude-sonnet-4-6: 1000000
+    opus: 200000
+    opusplan: 200000
+
+  # Override por repositório (opcional).
+  repos:
+    web:    { model: "claude-opus-4-5" }
+    mobile: { model: "claude-opus-4-5" }
+    hybrid: { model: "claude-opus-4-5" }
+
+  # Override por issue (opcional). Chave no formato "<repo>#<numero>".
+  issues:
+    # "web#42": { model: "claude-opus-4-8" }
