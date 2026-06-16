@@ -322,6 +322,67 @@ não foi necessário. A divergência (usage aninhado) **não muda o design**, s�
    duas goroutines via `WaitGroup` com teto de 30s (log de warn se estourar).
    Tasks em voo recebem o ctx cancelado (subprocesso `claude` → SIGTERM).
 
+## Sessão 7 — concluída em 2026-06-16
+
+### Concluído
+
+- **`internal/store/queries.go`** (aditivo): `LastRejectionReason(issueID)` —
+  retorna o motivo do último `/reject` da issue (último `approvals.reason` com
+  `state=rejected`), ou `""` se nunca rejeitada.
+- **`internal/scheduler/lifecycle.go`**: `handleReady` abre aprovação na tabela
+  `approvals` ao entrar em `awaiting_approval` — idempotente via
+  `GetPendingApproval` + `errors.Is(ErrNotFound)`.
+- **`internal/scheduler/scheduler.go`**:
+  - `cmdApprove` — chama `DecideApproval(approved=true, chatID)` antes de
+    `SetPhase(todo)` + `TransitionLabel`. Tolera ausência de pending approval
+    (warning + continua) para resistência a estados desincronizados.
+  - `cmdReject` — chama `DecideApproval(approved=false, motivo, chatID)` +
+    `SetPhase(ready)` + **`TransitionLabel(documentation → agent:ready)`** (BUG
+    corrigido: issue volta a ser listada por `processRepo` no próximo tick).
+    `fmt.Sprintf` no detail JSON (corrige JSON inválido da versão anterior).
+  - `cmdRun` (implementado): força processamento imediato conforme a fase —
+    `ready`/`documentation` → `handleReady`; `todo`/`doing` → `handleTodo`;
+    `awaiting_approval`/`done`/`error` → log sem efeito. Verifica pausa do repo
+    via `GetRepoState`. Respeita lock e semáforo via os próprios handlers
+    (`AcquireLock` faz skip se lock ativo).
+  - Adicionados imports `errors`, `fmt`.
+- **`internal/runner/runner.go`** (aditivo):
+  - `rejectionReader` interface (local, `LastRejectionReason`). `store.Store`
+    a satisfaz.
+  - `Runner.reject` campo; `New`/`newWithDeps` recebem `rr rejectionReader`
+    (store real; fake nos testes).
+  - `seedContext` refatorado: se arquivo vazio, semeia com corpo da issue (como
+    antes); em seguida — arquivo vazio ou não — acrescenta motivo do último
+    `/reject` via `appendRejection` (sem apagar conteúdo existente, sem duplicar).
+  - `appendRejection` (nova): `os.OpenFile(O_APPEND)` + verifica `Contains`
+    antes de escrever para evitar duplicação.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK. `CGO_ENABLED=0 go test ./...` → **todos
+  passando** (config + domain + github + runner + scheduler + store + telegram +
+  workspace). `go vet ./...` limpo, `gofmt` limpo.
+
+### Decisões tomadas nesta sessão
+
+1. **Via de reprocessamento após `/reject`**: `cmdReject` transita a label de
+   volta para `agent:ready` (Opção 1 recomendada). `processRepo` não mudou —
+   lista apenas `agent:ready`/`todo`. Na próxima rodada `handleReady` repega a
+   issue; `AcquireLock` garante que não há duplo processamento se a issue ainda
+   estiver em execução.
+2. **Persistência de aprovações**: `OpenApproval` chamado ao fim de `handleReady`
+   (após `SetPhase(awaiting_approval)`), com guarda `GetPendingApproval` +
+   `errors.Is(ErrNotFound)` para idempotência. `DecideApproval` chamado em
+   `cmdApprove`/`cmdReject` antes das transições de fase/label.
+3. **Motivo de `/reject` no `context.md`**: via nova query `LastRejectionReason`
+   no store; `runner.seedContext` a lê e acrescenta via `appendRejection`
+   (`O_APPEND`, sem apagar conteúdo existente, sem duplicar se já estiver lá).
+   O scheduler NÃO tem o checkout — a escrita fica inteiramente no runner, que já
+   tem acesso ao caminho via `workspace.Prepare`.
+4. **`/run #N`**: `awaiting_approval`/`done`/`error` → log sem efeito;
+   `ready`/`documentation` → `handleReady` (que trata o lock); `todo`/`doing`
+   → `handleTodo` (idem). Verifica pausa do repo antes de despachar.
+
 ## Roadmap (próximas sessões)
 
 Registrado em 2026-06-16, após a Sessão 6. O Argos já roda ponta a ponta; o que

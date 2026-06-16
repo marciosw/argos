@@ -47,6 +47,12 @@ type workspacePreparer interface {
 	Prepare(ctx context.Context, repo string) (string, error)
 }
 
+// rejectionReader lê o motivo do último /reject de uma issue. store.Store o
+// satisfaz (via LastRejectionReason adicionado na Sessão 7).
+type rejectionReader interface {
+	LastRejectionReason(ctx context.Context, issueID int64) (string, error)
+}
+
 // notifier é o subconjunto do telegram.Gateway usado pelo runner. A interface
 // telegram.Gateway o satisfaz.
 type notifier interface {
@@ -64,6 +70,7 @@ type Runner struct {
 	gh     prClient
 	notify notifier
 	ws     workspacePreparer
+	reject rejectionReader
 
 	maxSessions int
 }
@@ -72,12 +79,12 @@ type Runner struct {
 // dependências externas (store, github, telegram, workspace, config) são
 // injetadas. ws garante o checkout local do repo-alvo (RepoPath).
 func New(cfg *config.Config, st *store.Store, gh prClient, notify notifier, ws workspacePreparer) *Runner {
-	return newWithDeps(cfg, st, execRunner{killGrace: 10 * time.Second}, execGit{}, gh, notify, ws)
+	return newWithDeps(cfg, st, execRunner{killGrace: 10 * time.Second}, execGit{}, gh, notify, ws, st)
 }
 
 // newWithDeps é o construtor interno: injeta TODAS as dependências (usado nos
 // testes com fakes de subprocesso/git/workspace).
-func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git gitOps, gh prClient, notify notifier, ws workspacePreparer) *Runner {
+func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git gitOps, gh prClient, notify notifier, ws workspacePreparer, rr rejectionReader) *Runner {
 	return &Runner{
 		cfg:         cfg,
 		store:       st,
@@ -86,6 +93,7 @@ func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git git
 		gh:          gh,
 		notify:      notify,
 		ws:          ws,
+		reject:      rr,
 		maxSessions: defaultMaxSessions,
 	}
 }
@@ -147,10 +155,9 @@ func (r *Runner) runDocumentation(ctx context.Context, task domain.Task, iss dom
 		return fmt.Errorf("runner: scaffold de specs: %w", err)
 	}
 
-	// Semeia context.md com o corpo da issue (objetivo de negócio) na fase de
-	// documentação. Best-effort: não bloqueia a fase e nunca sobrescreve
-	// conteúdo já existente (pode conter motivos de /reject). Ver task_runner.md §6.
-	r.seedContext(ctx, task, specDir, log)
+	// Semeia context.md com o corpo da issue e acrescenta motivo de /reject
+	// (se houver). Best-effort: não bloqueia a fase. Ver task_runner.md §6.
+	r.seedContext(ctx, task, iss, specDir, log)
 
 	if err := r.runPhaseLoop(ctx, task, iss, "", log); err != nil {
 		r.notifyError(ctx, task, err)
@@ -400,25 +407,28 @@ func ensureSpecScaffold(specDir string) error {
 	return nil
 }
 
-// seedContext semeia context.md com o corpo da issue. Só escreve se o arquivo
-// estiver vazio (preserva conteúdo prévio, ex.: motivos de /reject). Best-effort:
-// falhas são logadas e não abortam a fase.
-func (r *Runner) seedContext(ctx context.Context, task domain.Task, specDir string, log *slog.Logger) {
+// seedContext semeia context.md na fase de documentação:
+//   - Se o arquivo estiver vazio, cria-o com o corpo da issue (objetivo de negócio).
+//   - Se houver um motivo de /reject registrado no store, ACRESCENTA ao arquivo
+//     (sem apagar conteúdo existente). Assim cada rejeição fica registrada.
+//
+// Best-effort: falhas são logadas e não abortam a fase.
+func (r *Runner) seedContext(ctx context.Context, task domain.Task, iss domain.Issue, specDir string, log *slog.Logger) {
 	path := filepath.Join(specDir, "context.md")
-	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		// Já tem conteúdo — não sobrescreve.
-		return
-	}
-	iss, err := r.gh.GetIssue(ctx, task.Repo, task.Issue)
-	if err != nil {
-		log.Warn("runner: GetIssue para semear context.md", "err", err)
-		return
-	}
-	body := strings.TrimSpace(iss.Body)
-	if body == "" {
-		body = "_(issue sem corpo)_"
-	}
-	content := fmt.Sprintf(`# context.md — issue #%d (%s)
+
+	existing, _ := os.ReadFile(path)
+	isEmpty := len(strings.TrimSpace(string(existing))) == 0
+
+	if isEmpty {
+		ghIss, err := r.gh.GetIssue(ctx, task.Repo, task.Issue)
+		if err != nil {
+			log.Warn("runner: GetIssue para semear context.md", "err", err)
+		} else {
+			body := strings.TrimSpace(ghIss.Body)
+			if body == "" {
+				body = "_(issue sem corpo)_"
+			}
+			content := fmt.Sprintf(`# context.md — issue #%d (%s)
 
 Semeado automaticamente pelo Argos com o corpo da issue (objetivo de negócio).
 Decisões do humano e motivos de /reject são acrescentados abaixo.
@@ -427,11 +437,49 @@ Decisões do humano e motivos de /reject são acrescentados abaixo.
 
 %s
 `, task.Issue, task.Repo, body)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		log.Warn("runner: escrever context.md", "err", err)
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				log.Warn("runner: escrever context.md", "err", err)
+				return
+			}
+			log.Info("runner: context.md semeado com o corpo da issue")
+		}
+	}
+
+	// Acrescenta o motivo do último /reject (se houver) independente de o
+	// arquivo ser novo ou pré-existente. Evita duplicar se já estiver lá.
+	if r.reject != nil {
+		reason, err := r.reject.LastRejectionReason(ctx, iss.ID)
+		if err != nil {
+			log.Warn("runner: LastRejectionReason", "err", err)
+		} else if reason != "" {
+			appendRejection(path, reason, log)
+		}
+	}
+}
+
+// appendRejection acrescenta o motivo de rejeição ao context.md sem apagar o
+// que já está lá. Evita duplicar se a string já constar no arquivo.
+func appendRejection(path, reason string, log *slog.Logger) {
+	existing, _ := os.ReadFile(path)
+	marker := fmt.Sprintf("## /reject\n\n%s", reason)
+	if strings.Contains(string(existing), reason) {
+		return // já registrado
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		log.Warn("runner: abrir context.md para append", "err", err)
 		return
 	}
-	log.Info("runner: context.md semeado com o corpo da issue")
+	defer f.Close()
+	prefix := "\n\n"
+	if len(existing) == 0 {
+		prefix = ""
+	}
+	if _, err := fmt.Fprintf(f, "%s%s\n", prefix, marker); err != nil {
+		log.Warn("runner: append context.md", "err", err)
+		return
+	}
+	log.Info("runner: motivo de /reject acrescentado ao context.md")
 }
 
 // specFileNames são os arquivos de spec por issue (spec §6).

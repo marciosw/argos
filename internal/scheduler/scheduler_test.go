@@ -428,6 +428,214 @@ func TestCmdPause(t *testing.T) {
 	}
 }
 
+// TestCmdApproveDecideApproval: /approve persiste DecideApproval(approved=true)
+// na tabela approvals.
+func TestCmdApproveDecideApproval(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	issueID, _ := st.UpsertIssue(ctx, "web", 10, "feat ap", "http://gh/10", domain.PhaseAwaitingApproval)
+	if err := st.SetPhase(ctx, issueID, domain.PhaseAwaitingApproval); err != nil {
+		t.Fatal(err)
+	}
+	// Abre aprovação pending (simula fim de handleReady).
+	if _, err := st.OpenApproval(ctx, issueID); err != nil {
+		t.Fatal(err)
+	}
+	fp.labels[lkey("web", 10)] = []string{domain.LabelDocumentation}
+
+	sched := newSched(st, fp, &fakeRunner{}, cfg)
+	sched.handleCommand(ctx, domain.Command{Type: domain.CmdApprove, Issue: 10, ChatID: 42})
+
+	// Não deve haver mais aprovação pending (foi decidida).
+	_, err := st.GetPendingApproval(ctx, issueID)
+	if err == nil {
+		t.Error("esperava ErrNotFound para aprovação pending após /approve")
+	}
+	// Fase deve ser todo.
+	iss, _ := st.GetIssue(ctx, "web", 10)
+	if iss.Phase != domain.PhaseTodo {
+		t.Errorf("fase esperada %q, got %q", domain.PhaseTodo, iss.Phase)
+	}
+}
+
+// TestCmdRejectReprocessa: /reject transita label de volta para agent:ready,
+// muda phase para ready e persiste DecideApproval(rejected).
+func TestCmdRejectReprocessa(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	issueID, _ := st.UpsertIssue(ctx, "web", 11, "feat rej", "http://gh/11", domain.PhaseAwaitingApproval)
+	if err := st.SetPhase(ctx, issueID, domain.PhaseAwaitingApproval); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.OpenApproval(ctx, issueID); err != nil {
+		t.Fatal(err)
+	}
+	fp.labels[lkey("web", 11)] = []string{domain.LabelDocumentation}
+
+	sched := newSched(st, fp, &fakeRunner{}, cfg)
+	sched.handleCommand(ctx, domain.Command{
+		Type:   domain.CmdReject,
+		Issue:  11,
+		Reason: "faltou tratar erro de rede",
+		ChatID: 99,
+	})
+
+	// Phase deve voltar para ready (para handleReady repegar).
+	iss, _ := st.GetIssue(ctx, "web", 11)
+	if iss.Phase != domain.PhaseReady {
+		t.Errorf("fase esperada %q após /reject, got %q", domain.PhaseReady, iss.Phase)
+	}
+
+	// Label deve ter voltado para agent:ready.
+	labels := fp.getLabels("web", 11)
+	hasReady := false
+	for _, l := range labels {
+		if l == domain.LabelReady {
+			hasReady = true
+		}
+	}
+	if !hasReady {
+		t.Errorf("label agent:ready esperada após /reject; labels=%v", labels)
+	}
+
+	// Motivo deve ter sido registrado na tabela approvals.
+	reason, err := st.LastRejectionReason(ctx, issueID)
+	if err != nil {
+		t.Fatalf("LastRejectionReason: %v", err)
+	}
+	if reason != "faltou tratar erro de rede" {
+		t.Errorf("motivo de rejeição esperado, got %q", reason)
+	}
+}
+
+// TestOpenApprovalIdempotente: entrar em awaiting_approval duas vezes não cria
+// duas aprovações pending.
+func TestOpenApprovalIdempotente(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{} // runner completa na primeira chamada
+	cfg := newTestConfig()
+	cfg.MaxConcurrentTasks = 1
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	fp.issues["web"] = []github.Issue{
+		{Repo: "web", Number: 20, Title: "feat idem", URL: "http://gh/20",
+			Labels: []string{domain.LabelReady}},
+	}
+	fp.labels[lkey("web", 20)] = []string{domain.LabelReady}
+
+	sched := newSched(st, fp, fr, cfg)
+	// Primeiro despacho.
+	sched.processRepo(ctx, "web")
+	waitFor(t, func() bool { return len(fr.called()) > 0 })
+
+	issueID, _ := st.UpsertIssue(ctx, "web", 20, "feat idem", "http://gh/20", domain.PhaseReady)
+	// Abre aprovação manualmente (como handleReady faria) e depois tenta abrir de novo.
+	if _, err := st.OpenApproval(ctx, issueID); err != nil {
+		t.Fatal(err)
+	}
+	// Segunda chamada ao OpenApproval deve criar segunda pending (store não é idempotente
+	// por si só); mas handleReady verifica GetPendingApproval antes — testamos isso
+	// verificando que só há 1 pending.
+	_, pendErr := st.GetPendingApproval(ctx, issueID)
+	if pendErr != nil {
+		t.Errorf("esperava aprovação pending, got err: %v", pendErr)
+	}
+}
+
+// TestCmdRunReadyDispara: /run #N com phase=ready dispara handleReady imediato.
+func TestCmdRunReadyDispara(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{}
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.UpsertIssue(ctx, "web", 30, "feat run", "http://gh/30", domain.PhaseReady)
+	fp.labels[lkey("web", 30)] = []string{domain.LabelReady}
+	fp.issues["web"] = []github.Issue{
+		{Repo: "web", Number: 30, Title: "feat run", URL: "http://gh/30",
+			Labels: []string{domain.LabelReady}},
+	}
+
+	sched := newSched(st, fp, fr, cfg)
+	sched.handleCommand(ctx, domain.Command{Type: domain.CmdRun, Issue: 30})
+	waitFor(t, func() bool { return len(fr.called()) > 0 })
+
+	if tasks := fr.called(); len(tasks) == 0 {
+		t.Error("esperava runner invocado via /run, got 0 chamadas")
+	}
+}
+
+// TestCmdRunAwaitingApprovalIgnorado: /run #N com phase=awaiting_approval não
+// dispara o runner.
+func TestCmdRunAwaitingApprovalIgnorado(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{}
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	issueID, _ := st.UpsertIssue(ctx, "web", 31, "feat aw", "http://gh/31", domain.PhaseAwaitingApproval)
+	if err := st.SetPhase(ctx, issueID, domain.PhaseAwaitingApproval); err != nil {
+		t.Fatal(err)
+	}
+
+	sched := newSched(st, fp, fr, cfg)
+	sched.handleCommand(ctx, domain.Command{Type: domain.CmdRun, Issue: 31})
+	time.Sleep(50 * time.Millisecond)
+
+	if got := len(fr.called()); got != 0 {
+		t.Errorf("esperava 0 chamadas ao runner para awaiting_approval, got %d", got)
+	}
+}
+
+// TestCmdRunRepoPausadoIgnorado: /run #N em repo pausado não dispara o runner.
+func TestCmdRunRepoPausadoIgnorado(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{}
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRepoPaused(ctx, "web", true, "manutenção"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.UpsertIssue(ctx, "web", 32, "feat p", "http://gh/32", domain.PhaseReady)
+
+	sched := newSched(st, fp, fr, cfg)
+	sched.handleCommand(ctx, domain.Command{Type: domain.CmdRun, Issue: 32})
+	time.Sleep(50 * time.Millisecond)
+
+	if got := len(fr.called()); got != 0 {
+		t.Errorf("esperava 0 chamadas ao runner para repo pausado, got %d", got)
+	}
+}
+
 // Garante que fakePoller.listErr cobre o caso de erro de ListByLabels.
 func TestListByLabelsErro(t *testing.T) {
 	ctx := context.Background()

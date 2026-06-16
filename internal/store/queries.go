@@ -337,6 +337,25 @@ func (s *Store) GetPendingApproval(ctx context.Context, issueID int64) (domain.A
 	return scanApproval(row)
 }
 
+// LastRejectionReason retorna o motivo do último /reject para a issue, ou ""
+// se nunca foi rejeitada. Usado pelo runner para semear context.md.
+func (s *Store) LastRejectionReason(ctx context.Context, issueID int64) (string, error) {
+	var reason sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT reason FROM approvals
+		 WHERE issue_id = ? AND state = ?
+		 ORDER BY id DESC LIMIT 1`,
+		issueID, string(domain.ApprovalRejected),
+	).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: last rejection reason %d: %w", issueID, err)
+	}
+	return reason.String, nil
+}
+
 // ========================= processed_events ==========================
 
 // MarkEventProcessed registra um evento externo como processado (idempotência).

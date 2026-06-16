@@ -2,11 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/marciomacedo/argos/internal/domain"
 	"github.com/marciomacedo/argos/internal/github"
+	"github.com/marciomacedo/argos/internal/store"
 )
 
 // processRepo lista issues elegíveis do repo e despacha conforme o label dominante.
@@ -87,6 +89,14 @@ func (s *Scheduler) handleReady(ctx context.Context, repo string, iss github.Iss
 				slog.Error("scheduler: handleReady SetPhase awaiting_approval",
 					"repo", repo, "issue", iss.Number, "err", err)
 			} else {
+				// Abre aprovação na tabela approvals (idempotente: pula se já
+				// houver uma pending para esta issue).
+				_, pendErr := s.store.GetPendingApproval(ctx, issueID)
+				if errors.Is(pendErr, store.ErrNotFound) {
+					if _, apErr := s.store.OpenApproval(ctx, issueID); apErr != nil {
+						slog.Warn("scheduler: OpenApproval", "repo", repo, "issue", iss.Number, "err", apErr)
+					}
+				}
 				slog.Info("scheduler: documentação concluída, aguardando aprovação",
 					"repo", repo, "issue", iss.Number)
 			}

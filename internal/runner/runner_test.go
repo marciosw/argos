@@ -109,6 +109,16 @@ func (f *fakeWorkspace) Prepare(_ context.Context, repo string) (string, error) 
 	return f.path, f.err
 }
 
+// fakeRejection simula o store.LastRejectionReason.
+type fakeRejection struct {
+	reason string
+	err    error
+}
+
+func (f *fakeRejection) LastRejectionReason(_ context.Context, _ int64) (string, error) {
+	return f.reason, f.err
+}
+
 type fakeNotifier struct {
 	approvals   []telegram.ApprovalRequest
 	prs         []string
@@ -264,7 +274,7 @@ func TestRunDocumentation(t *testing.T) {
 	git := &fakeGit{}
 	gh := &fakeGitHub{}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
 		Model: "claude-test", ContextWindow: 200000}
@@ -327,7 +337,7 @@ func TestRunUsesWorkspacePath(t *testing.T) {
 	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
 	ws := &fakeWorkspace{path: repoPath}
 	gh := &fakeGitHub{issue: github.Issue{Body: "qualquer"}}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, ws)
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, ws, &fakeRejection{})
 
 	// Task SEM RepoPath: deve ser resolvido pelo workspace.
 	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
@@ -357,7 +367,7 @@ func TestRunSeedsContext(t *testing.T) {
 
 	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
 	gh := &fakeGitHub{issue: github.Issue{Body: "Permitir login social com Google."}}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
 		Model: "claude-test", ContextWindow: 200000}
@@ -396,7 +406,7 @@ func TestSeedContextPreservesExisting(t *testing.T) {
 
 	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
 	gh := &fakeGitHub{issue: github.Issue{Body: "corpo novo da issue"}}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
 		Model: "claude-test", ContextWindow: 200000}
@@ -414,6 +424,57 @@ func TestSeedContextPreservesExisting(t *testing.T) {
 	}
 }
 
+// TestSeedContextAppendsRejectionReason garante que o motivo do último /reject é
+// ACRESCENTADO ao context.md sem apagar o conteúdo já existente.
+func TestSeedContextAppendsRejectionReason(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	cfg := newTestConfig(t)
+	repoPath := t.TempDir()
+
+	specDir := filepath.Join(repoPath, "docs", "specs", "issue-55")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const prev = "# context.md\n\n## Corpo da issue\n\nImplementar login social."
+	if err := os.WriteFile(filepath.Join(specDir, "context.md"), []byte(prev), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	createIssue(t, st, "web", 55, "feat login", domain.PhaseDocumentation)
+
+	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
+	gh := &fakeGitHub{issue: github.Issue{Body: "Implementar login social."}}
+	rr := &fakeRejection{reason: "faltou tratar expiração do token"}
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath}, rr)
+
+	task := domain.Task{Repo: "web", Issue: 55, Phase: domain.PhaseDocumentation,
+		Model: "claude-test", ContextWindow: 200000}
+
+	if err := r.Run(ctx, task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(specDir, "context.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Conteúdo original preservado.
+	if !strings.Contains(content, "Implementar login social.") {
+		t.Errorf("context.md perdeu o conteúdo original:\n%s", content)
+	}
+	// Motivo de /reject acrescentado.
+	if !strings.Contains(content, "faltou tratar expiração do token") {
+		t.Errorf("motivo de /reject não encontrado no context.md:\n%s", content)
+	}
+	// Não duplicado em chamada dupla.
+	if strings.Count(content, "faltou tratar expiração do token") > 1 {
+		t.Errorf("motivo de /reject duplicado no context.md:\n%s", content)
+	}
+}
+
 // ─── Run: doing ─────────────────────────────────────────────────────────────────
 
 func TestRunCoding(t *testing.T) {
@@ -428,7 +489,7 @@ func TestRunCoding(t *testing.T) {
 	git := &fakeGit{commits: 3}
 	gh := &fakeGitHub{pr: github.PullRequest{Number: 9, URL: "http://gh/pull/9"}}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 7, Phase: domain.PhaseDoing,
 		Model: "claude-test", ContextWindow: 200000}
@@ -480,7 +541,7 @@ func TestRunResumesOnContext(t *testing.T) {
 	high := streamLines(Usage{CacheReadInputTokens: 180000}, true)
 	low := streamLines(Usage{InputTokens: 100}, true)
 	cmd := &fakeCmd{linesByCall: [][]string{high, low}}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, &fakeNotifier{}, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 5, Phase: domain.PhaseDocumentation,
 		Model: "claude-test", ContextWindow: 200000}
@@ -559,7 +620,7 @@ func TestRunErrorPreservesProgress(t *testing.T) {
 
 	cmd := &fakeCmd{exitCode: 1, stderr: "boom", linesByCall: [][]string{streamLines(Usage{InputTokens: 1}, false)}}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, nt, &fakeWorkspace{path: repoPath})
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, nt, &fakeWorkspace{path: repoPath}, &fakeRejection{})
 
 	task := domain.Task{Repo: "web", Issue: 3, Phase: domain.PhaseDocumentation,
 		Model: "claude-test", ContextWindow: 200000}

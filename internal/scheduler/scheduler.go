@@ -7,6 +7,8 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -121,8 +123,10 @@ func (s *Scheduler) handleCommand(ctx context.Context, cmd domain.Command) {
 		if err := s.store.Audit(ctx, 0, cmd.Repo, "repo_resumed", "{}"); err != nil {
 			slog.Warn("scheduler: audit CmdResume", "err", err)
 		}
-	case domain.CmdStatus, domain.CmdRun:
-		slog.Info("scheduler: comando não implementado nesta sessão", "type", cmd.Type)
+	case domain.CmdStatus:
+		slog.Info("scheduler: CmdStatus tratado diretamente pelo gateway Telegram")
+	case domain.CmdRun:
+		s.cmdRun(ctx, cmd)
 	}
 }
 
@@ -136,6 +140,15 @@ func (s *Scheduler) cmdApprove(ctx context.Context, cmd domain.Command) {
 		slog.Warn("scheduler: CmdApprove — issue não está em awaiting_approval",
 			"repo", repo, "issue", cmd.Issue, "phase", issue.Phase)
 		return
+	}
+	// Persiste a decisão na tabela approvals antes de qualquer transição de fase.
+	if err := s.store.DecideApproval(ctx, issue.ID, true, "", cmd.ChatID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Error("scheduler: CmdApprove DecideApproval", "repo", repo, "issue", cmd.Issue, "err", err)
+			return
+		}
+		// Sem aprovação pendente: prossegue mesmo assim (tolerância a estado desincronizado).
+		slog.Warn("scheduler: CmdApprove sem aprovação pendente no store", "repo", repo, "issue", cmd.Issue)
 	}
 	if err := s.store.SetPhase(ctx, issue.ID, domain.PhaseTodo); err != nil {
 		slog.Error("scheduler: CmdApprove SetPhase", "repo", repo, "issue", cmd.Issue, "err", err)
@@ -157,19 +170,85 @@ func (s *Scheduler) cmdReject(ctx context.Context, cmd domain.Command) {
 		slog.Warn("scheduler: CmdReject — issue não encontrada", "issue", cmd.Issue)
 		return
 	}
-	if err := s.store.SetPhase(ctx, issue.ID, domain.PhaseDocumentation); err != nil {
+	// Persiste a decisão na tabela approvals com o motivo.
+	if err := s.store.DecideApproval(ctx, issue.ID, false, cmd.Reason, cmd.ChatID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Error("scheduler: CmdReject DecideApproval", "repo", repo, "issue", cmd.Issue, "err", err)
+			return
+		}
+		slog.Warn("scheduler: CmdReject sem aprovação pendente no store", "repo", repo, "issue", cmd.Issue)
+	}
+	if err := s.store.SetPhase(ctx, issue.ID, domain.PhaseReady); err != nil {
 		slog.Error("scheduler: CmdReject SetPhase", "repo", repo, "issue", cmd.Issue, "err", err)
 		return
+	}
+	// Transita a label de volta para agent:ready para que o próximo tick
+	// de processRepo repegue a issue via handleReady (nova rodada de docs).
+	if err := s.poller.TransitionLabel(ctx, repo, cmd.Issue, domain.LabelDocumentation, domain.LabelReady); err != nil {
+		slog.Error("scheduler: CmdReject TransitionLabel", "repo", repo, "issue", cmd.Issue, "err", err)
 	}
 	body := "Rejeitado: " + cmd.Reason
 	if err := s.poller.Comment(ctx, repo, cmd.Issue, body); err != nil {
 		slog.Error("scheduler: CmdReject Comment", "repo", repo, "issue", cmd.Issue, "err", err)
 	}
-	detail := `{"reason":` + `"` + cmd.Reason + `"}`
+	detail := fmt.Sprintf(`{"reason":%q}`, cmd.Reason)
 	if err := s.store.Audit(ctx, issue.ID, repo, "rejected", detail); err != nil {
 		slog.Warn("scheduler: audit reject", "err", err)
 	}
 	slog.Info("scheduler: issue rejeitada", "repo", repo, "issue", cmd.Issue, "reason", cmd.Reason)
+}
+
+// cmdRun força o processamento imediato de uma issue conforme a fase atual,
+// sem esperar o próximo tick. Respeita lock, semáforo e pausa do repo.
+func (s *Scheduler) cmdRun(ctx context.Context, cmd domain.Command) {
+	issue, repo, found := s.findIssue(ctx, cmd.Issue)
+	if !found {
+		slog.Warn("scheduler: CmdRun — issue não encontrada", "issue", cmd.Issue)
+		return
+	}
+	log := slog.With("repo", repo, "issue", cmd.Issue, "phase", string(issue.Phase))
+
+	switch issue.Phase {
+	case domain.PhaseAwaitingApproval:
+		log.Info("scheduler: CmdRun — issue aguardando aprovação humana; /run ignorado")
+		return
+	case domain.PhaseDone:
+		log.Info("scheduler: CmdRun — issue já concluída; /run ignorado")
+		return
+	case domain.PhaseError:
+		log.Info("scheduler: CmdRun — issue em estado de erro; use /approve ou corrija manualmente")
+		return
+	case domain.PhaseDoing, domain.PhaseDocumentation:
+		// Pode já ter um lock ativo (task em execução). handleReady/handleTodo
+		// faz skip via AcquireLock se o lock já existir — comportamento correto.
+		log.Info("scheduler: CmdRun — fase em progresso; tentando adquirir lock")
+	}
+
+	// Verifica pausa do repo.
+	state, err := s.store.GetRepoState(ctx, repo)
+	if err == nil && state.Paused {
+		log.Warn("scheduler: CmdRun — repo pausado; /run ignorado")
+		return
+	}
+
+	// Sintetiza um github.Issue mínimo para passar aos handlers.
+	ghIss := github.Issue{
+		Repo:   repo,
+		Number: issue.Number,
+		Title:  issue.Title,
+		URL:    issue.GitHubURL,
+	}
+
+	switch issue.Phase {
+	case domain.PhaseReady, domain.PhaseDocumentation:
+		ghIss.Labels = []string{domain.LabelReady}
+		s.handleReady(ctx, repo, ghIss)
+	case domain.PhaseTodo, domain.PhaseDoing:
+		ghIss.Labels = []string{domain.LabelTodo}
+		s.handleTodo(ctx, repo, ghIss)
+	default:
+		log.Warn("scheduler: CmdRun — fase não acionável")
+	}
 }
 
 // findIssue procura uma issue por número em todos os repos configurados.
