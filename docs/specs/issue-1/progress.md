@@ -130,27 +130,48 @@ transcript original (ver task_runner.md §6).
 2. `handleTodo` faz UpsertIssue quando a issue não está no store, para tolerância a tick de polling que chega antes da issue ter sido registrada via `handleReady`.
 3. `findIssue` itera `cfg.GitHub.Repos` (sem ordem garantida em map Go) — OK porque os números de issue são únicos por repo neste projeto.
 
-## Sessão 4 — por onde começar
+## Sessão 4 — concluída em 2026-06-16
 
-- **Pacote a implementar**: `internal/scheduler/` (design.md §4 e §8; seguir
-  design.md §3 e §6 para o loop + máquina de estados).
-  - `scheduler.go` — loop principal: ticker configurável, `ListActiveRepos`,
-    despacho de tarefas elegíveis com semáforo (`max_concurrent_tasks`).
-  - `lifecycle.go` — transições de label: `agent:ready → documentation → todo →
-    doing → done`, consumindo `Poller` + `Store`.
-- **Decisões pendentes antes de codificar runner/scheduler**:
-  - Flags reais do Claude Code CLI e schema do `stream-json` (`claude --help`) —
-    task_runner.md §11.
-  - Local dos checkouts dos repos-alvo (worktrees vs. clones) — task_runner.md §11.
+### Concluído
+
+- **`internal/telegram/digest.go`** — `DigestData`, `ApprovalRequest`, `FormatDigest` (HTML).
+- **`internal/telegram/commands.go`** — `parseCommand` puro: strip `@botname`, aceita `#N`/`N`, valida repo em `/pause`/`/resume`, `motivo` livre em `/reject`, erro descritivo em comando desconhecido ou args faltando.
+- **`internal/telegram/gateway.go`** — `tgClient` (setWebhook, sendMessage, sendDocument multipart) + `Gateway` interface + `gateway` struct:
+  - `New` — lê tokens das envs configuradas; retorna erro se ausentes (nunca loga).
+  - `newWithToken` — construtor interno para testes (base URL sobrescrita pelo httptest.Server).
+  - `Start` — registra webhook (pula se `WebhookURL == ""`), serve `POST /telegram/webhook` em `:8080`, faz `Shutdown` ao cancelar ctx.
+  - Handler webhook: valida secret (→ 403), verifica `AllowedChatIDs`, idempotência por `update_id` (SQLite), responde 200 antes de goroutine, `/status` tratado direto via `store.StatusSnapshot`, demais comandos enviados ao canal (non-blocking).
+  - `SendApprovalRequest`, `Notify`, `NotifyAll`, `NotifyPR`, `NotifyError`.
+- **`internal/telegram/telegram_test.go`** — 16 testes:
+  - `parseCommand`: `/approve #42`, `/approve 42`, `/approve@bot #42`, `/reject #1 texto longo`, `/reject #1` (erro), `/pause web`, `/pause invalid` (erro), `/status`, comando desconhecido (erro).
+  - `FormatDigest`: campos esperados + instrução de aprovação no HTML.
+  - `tgClient`: path e payload de `sendMessage`; multipart de `sendDocument`.
+  - Handler webhook: secret inválido → 403; chat não autorizado → 200 + descartado; `update_id` duplicado → 200 + descartado; comando válido → `domain.Command` no canal.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK.
+- `CGO_ENABLED=0 go test ./...` → **todos passando** (config + domain + github + scheduler + store + telegram).
+
+### Decisões tomadas nesta sessão
+
+1. `newWithToken` exposto no pacote para testes internos (base URL do tgClient injetável via httptest.Server); `New` é o construtor público que lê as envs.
+2. `/status` resolvido diretamente no webhook handler (goroutine chama `store.StatusSnapshot` e `sendMessage`) — não passa pelo canal do Scheduler.
+3. Handler retorna 200 antes de qualquer I/O pesado; goroutine usa `context.Background()` desacoplado do request.
+4. `sendDocument` usa `multipart/form-data`; em falha de leitura de arquivo, loga e continua com os demais (digest já enviado).
+
+## Sessão 5 — por onde começar
+
+- **Pacote a implementar**: `internal/runner/` (task_runner.md).
+- **Decisões pendentes antes de codificar**:
+  - Verificar flags reais do Claude Code CLI: `claude --help` e schema do `stream-json` — task_runner.md §11.
+  - Local dos checkouts dos repos-alvo (worktrees vs. clones simples) — task_runner.md §11.
 - **Pontos de atenção**:
-  - Manter `CGO_ENABLED=0` em todo build/CI.
-  - Reconciliação labels↔SQLite é do Scheduler; o Poller só executa operações de
-    GitHub (github_poller.md §1).
-  - Inconsistência de doc: persistence.md §30 e telegram_gateway.md ainda citam
-    Cloud Run/efêmero, mas a decisão confirmada é **VM única no GCP Compute Engine
-    com disco persistente** (design.md §12). Atualizar quando conveniente.
-  - `go test -race` exige CGO; rodar testes sem `-race` para honrar
-    `CGO_ENABLED=0`.
+  - Cálculo de `uso = tokens_usados / janela_do_modelo`; threshold 65% em `ContextThreshold`.
+  - Ao superar o threshold: atualizar `progress.md`, encerrar sessão, iniciar nova com `progress.md` + `context.md` injetados.
+  - `exec.Command` com `--dangerously-skip-permissions --output-format stream-json`; confirmar flags exatas contra o CLI instalado.
+  - `go test -race` exige CGO; rodar testes sem `-race` para honrar `CGO_ENABLED=0`.
+- **Modelo sugerido**: Opus (alta complexidade, decisões de julgamento, schema a confirmar).
 
 ### Modelo recomendado por sessão
 
