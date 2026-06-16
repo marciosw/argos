@@ -88,3 +88,23 @@ transcript original (ver task_runner.md §6).
     GCP Compute Engine com disco persistente** (design.md §12). Atualizar essas
     seções da spec quando conveniente.
   - `go test -race` exige CGO; rodar testes sem `-race` para honrar `CGO_ENABLED=0`.
+
+### Modelo recomendado por sessão
+
+As specs já estão detalhadas e a Sessão 1 fixou os padrões (store, config,
+domain, estilo de erro/log/teste), então a maior parte do que resta é "seguir o
+padrão", adequado ao Sonnet. A exceção é o **runner**, onde há decisões de
+julgamento e incerteza real (schema do `stream-json` a confirmar, cálculo de %
+de janela, ciclo de vida do subprocesso, reset de sessão) — manter no Opus.
+
+| Pacote / sessão | Complexidade | Modelo sugerido |
+| --- | --- | --- |
+| `internal/github/` (client REST, poller, PR) | mecânico (HTTP + tipos) | **Sonnet** |
+| `internal/telegram/` (webhook, parsing de comandos) | mecânico (parsing + HTTP) | **Sonnet** |
+| `internal/scheduler/` (loop + máquina de estados, locks) | média (reconciliação labels↔SQLite, idempotência, concorrência) | **Sonnet** (Opus se surgir ambiguidade) |
+| `internal/runner/` (subprocesso `claude`, `stream-json`, janela de contexto, retomada) | **alta** (specs pedem confirmar contra o CLI instalado) | **Opus** |
+
+Recomendação prática: Sonnet para github → telegram → scheduler; trocar para
+Opus no runner ou em qualquer sessão que abra uma decisão ainda não resolvida na
+spec. Para o Sonnet render bem, manter prompts de sessão com escopo fechado e
+restrições explícitas (como nesta Sessão 1).
