@@ -66,28 +66,62 @@ transcript original (ver task_runner.md §6).
 7. **`DecideApproval` não muda a fase da issue** — a transição de label/fase é do
    Scheduler (design.md §3).
 
-### Sessão 2 — por onde começar
+## Sessão 2 — concluída em 2026-06-15
 
-- **Primeiro arquivo a abrir**: `docs/specs/github_poller.md` + `design.md` §5
-  (estrutura de pacotes). Implementar `internal/github/` (client.go, poller.go,
-  pr.go) — cliente `net/http` próprio (recomendação da spec; sem `go-github`).
-- Em seguida, `internal/scheduler/` (loop + lifecycle de labels), consumindo
-  store + config já prontos.
-- **Decisões pendentes a confirmar antes de codificar o runner/poller**:
+### Concluído
+
+- **`internal/github/client.go`** — `Client` sobre `net/http` (sem dependência pesada):
+  - Headers `Authorization: Bearer`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`.
+  - Timeout de 30 s por request.
+  - Retry com backoff exponencial em 5xx e 429 (`maxRetries = 4`).
+  - Leitura de `X-RateLimit-Remaining/Limit/Reset`; respeito ao `Retry-After` em 429.
+  - `WithInstantBackoff()` para testes sem sleeps reais.
+- **`internal/github/poller.go`** — `Poller` interface + implementação (`poller`):
+  - `NewPollerFromConfig` lê o token da env nomeada em `cfg.TokenEnv` (nunca hardcode).
+  - `ListByLabels` — GET issues abertas com qualquer das labels (OR), `per_page=100`.
+  - `TransitionLabel` — reconciliação: GET labels → diff → PUT (substituição atômica); noop se já no estado correto.
+  - `SetLabel` / `ClearLabel` — idem via reconciliação (idempotente).
+  - `Comment` — POST comment na issue.
+  - Tipos: `Issue`, `OpenPRInput`, `PullRequest` (brutos do GitHub; separados de `domain.Issue`).
+- **`internal/github/pr.go`** — `OpenPR`:
+  - Confirma existência da branch via `GET /git/ref/heads/{branch}` antes de criar o PR.
+  - `POST /pulls` com title, head, base, body.
+  - Log estruturado com slog (`repo`, `issue`, `pr_number`, `url`).
+- **`internal/github/poller_test.go`** — 13 testes com `httptest.Server` (sem chamadas de rede reais):
+  - `TestListByLabels`, `TestListByLabelsEmpty`, `TestListByLabelsUnknownRepo`.
+  - `TestTransitionLabel`, `TestTransitionLabelNoop`, `TestComputeTransition`.
+  - `TestRetry429`, `TestRetry429WithRetryAfter`, `TestRetry5xx`, `TestRetryExhausted`, `TestNo4xxRetry`.
+  - `TestRateLimitHeaders`.
+  - `TestOpenPR`, `TestOpenPRBranchNotFound`.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK.
+- `CGO_ENABLED=0 go test ./...` → **todos passando** (config + store + github).
+- `go vet ./...` → limpo.
+- Token nunca logado; lido do ambiente via `os.Getenv(cfg.TokenEnv)`.
+
+### Sessão 3 — por onde começar
+
+- **Pacote a implementar**: `internal/scheduler/` (design.md §4 e §8; seguir
+  design.md §3 e §6 para o loop + máquina de estados).
+  - `scheduler.go` — loop principal: ticker configurável, `ListActiveRepos`,
+    despacho de tarefas elegíveis com semáforo (`max_concurrent_tasks`).
+  - `lifecycle.go` — transições de label: `agent:ready → documentation → todo →
+    doing → done`, consumindo `Poller` + `Store`.
+- **Decisões pendentes antes de codificar runner/scheduler**:
   - Flags reais do Claude Code CLI e schema do `stream-json` (`claude --help`) —
     task_runner.md §11.
-  - Intervalo de polling/backoff (design.md §12 ponto 1; default 60s já no config).
-  - Lib do GitHub: confirmar `net/http` próprio (github_poller.md §10 ponto 1).
   - Local dos checkouts dos repos-alvo (worktrees vs. clones) — task_runner.md §11.
 - **Pontos de atenção**:
   - Manter `CGO_ENABLED=0` em todo build/CI.
-  - Reconciliação labels↔SQLite é do Scheduler; o poller só executa operações de
+  - Reconciliação labels↔SQLite é do Scheduler; o Poller só executa operações de
     GitHub (github_poller.md §1).
   - Inconsistência de doc: persistence.md §30 e telegram_gateway.md ainda citam
-    Cloud Run/efêmero em parte do texto, mas a decisão confirmada é **VM única no
-    GCP Compute Engine com disco persistente** (design.md §12). Atualizar essas
-    seções da spec quando conveniente.
-  - `go test -race` exige CGO; rodar testes sem `-race` para honrar `CGO_ENABLED=0`.
+    Cloud Run/efêmero, mas a decisão confirmada é **VM única no GCP Compute Engine
+    com disco persistente** (design.md §12). Atualizar quando conveniente.
+  - `go test -race` exige CGO; rodar testes sem `-race` para honrar
+    `CGO_ENABLED=0`.
 
 ### Modelo recomendado por sessão
 
