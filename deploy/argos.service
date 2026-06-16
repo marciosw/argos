@@ -1,0 +1,14 @@
+[Unit]
+Description=Argos — orquestrador de agentes de codificação
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/argos/env
+ExecStart=/usr/local/bin/argos --config /etc/argos/config.yaml
+Restart=on-failure
+RestartSec=10
+WorkingDirectory=/var/lib/argos
+
+[Install]
+WantedBy=multi-user.target

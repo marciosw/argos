@@ -1,0 +1,4 @@
+# Substitua pelo domínio real apontado para esta VM.
+argos.exemplo.com {
+	reverse_proxy localhost:8080
+}

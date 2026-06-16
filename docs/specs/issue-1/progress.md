@@ -383,6 +383,84 @@ não foi necessário. A divergência (usage aninhado) **não muda o design**, s�
    `ready`/`documentation` → `handleReady` (que trata o lock); `todo`/`doing`
    → `handleTodo` (idem). Verifica pausa do repo antes de despachar.
 
+## Sessão 8 — concluída em 2026-06-16
+
+### Concluído
+
+- **`internal/github/client.go`**:
+  - `ErrNotModified = errors.New("github: not modified")` — sentinela para 304.
+  - `once` recebe `ifNoneMatch string` (header `If-None-Match` condicional) e
+    retorna `responseETag string` (lido de `resp.Header.Get("ETag")`). Em 304
+    retorna `ErrNotModified` com `shouldRetry=false`.
+  - `do` atualizado para chamar `once("", ...)` — zero-value, sem mudança de
+    comportamento externo.
+  - `doConditional(ctx, path, ifNoneMatch, out)` → `(rl, newETag, error)`:
+    retry loop próprio; 304 retorna imediatamente sem retry.
+- **`internal/github/poller.go`**:
+  - Interface `Poller.ListByLabels` nova assinatura:
+    `(ctx, repo string, labels []string, etag string) ([]Issue, string, error)`.
+  - Implementação chama `doConditional`; em 304 retorna `(nil, etag, nil)` (nil
+    interpretado como "sem mudanças" pelo scheduler). Import `"errors"` adicionado.
+- **`internal/github/poller_test.go`**:
+  - Todos os call sites de `ListByLabels` atualizados (4.º arg `""`, 3 valores de
+    retorno).
+  - Novos testes: `TestListByLabelsETagSentAndReturned` (ETag enviado na segunda
+    chamada, newETag retornado), `TestListByLabels304` (304 → nil issues + ETag
+    original preservado).
+- **`internal/scheduler/lifecycle.go`** — `processRepo`:
+  - Lê `store.GetRepoState(ctx, repo)` para obter ETag atual.
+  - Chama `poller.ListByLabels(..., state.ETag)`.
+  - `nil` issues (304) → retorna sem despacho.
+  - 429 (`*github.APIError.StatusCode == 429`) → `s.backoffUntil = now + 2*PollInterval`.
+  - 200 → `store.UpdatePollCursor(ctx, repo, now, newETag)` + despacha issues.
+  - Imports: `"time"` adicionado.
+- **`internal/scheduler/scheduler.go`**:
+  - Campo `backoffUntil time.Time` no `Scheduler`.
+  - `processTick`: se `!backoffUntil.IsZero() && time.Now().Before(backoffUntil)`
+    → log + retorna sem processar repos.
+- **`internal/scheduler/scheduler_test.go`**:
+  - `fakePoller.ListByLabels` atualizado para nova assinatura.
+  - `TestBackoffRateLimit`: `listErr = &github.APIError{StatusCode: 429}` →
+    `s.backoffUntil` setado no futuro.
+  - `TestBackoffSkipsTick`: `backoffUntil` no futuro → `processTick` retorna sem
+    chamar runner.
+- **`deploy/argos.service`** — unit systemd: `EnvironmentFile=/etc/argos/env`,
+  `ExecStart=... --config /etc/argos/config.yaml`, `Restart=on-failure`,
+  `RestartSec=10`, `WorkingDirectory=/var/lib/argos`.
+- **`deploy/env.example`** — variáveis obrigatórias comentadas.
+- **`deploy/Caddyfile`** — reverse proxy para `localhost:8080` com TLS automático
+  via Let's Encrypt (padrão Caddy). Comentário inline indica substituição do domínio.
+- **`README.md`** — runbook completo: O que é, Pré-requisitos, Instalação (7
+  passos), Configuração, Operação (systemctl + journalctl + comandos Telegram),
+  Atualizar.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK.
+- `CGO_ENABLED=0 go test ./...` → **todos passando** (config + domain + github +
+  runner + scheduler + store + telegram + workspace). `go vet ./...` limpo,
+  `gofmt` aplicado.
+
+### Decisões tomadas nesta sessão
+
+1. **Assinatura de `ListByLabels`**: `etag string` como 4.º parâmetro de entrada;
+   retorna `([]Issue, newETag string, error)`. `nil` issues = 304 (sem mudanças),
+   distinguível de `[]Issue{}` (200 com lista vazia). Impacto: `fakePoller` nos
+   testes do scheduler atualizado; todos os testes passam.
+2. **Detecção e aplicação do backoff de rate limit**: o scheduler detecta via
+   `errors.As(err, &apiErr) && apiErr.StatusCode == 429` em `processRepo`.
+   `backoffUntil` é um campo global no `Scheduler` (um token/conta → um backoff).
+   Valor: `now + 2*PollInterval` (Reset da API não é threading até o scheduler).
+   Verificação no início de `processTick` (antes do reap de locks).
+3. **`doConditional` vs modificação de `do`**: método separado no `Client` com seu
+   próprio retry loop. Mantém `do` sem mudança de assinatura para os ~10 callers
+   existentes; `once` ganhou `ifNoneMatch` e `responseETag` sem quebrar o único
+   caller (`do`) que usa os zero-values.
+4. **Layout do `deploy/`**: três arquivos de texto puro (`argos.service`,
+   `env.example`, `Caddyfile`). Nenhuma ferramenta de infra externa (sem Ansible,
+   Terraform, etc.). `env.example` copiado manualmente para `/etc/argos/env` com
+   `chmod 600`.
+
 ## Roadmap (próximas sessões)
 
 Registrado em 2026-06-16, após a Sessão 6. O Argos já roda ponta a ponta; o que

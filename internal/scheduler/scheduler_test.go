@@ -33,13 +33,13 @@ func newFakePoller() *fakePoller {
 
 func lkey(repo string, issue int) string { return fmt.Sprintf("%s#%d", repo, issue) }
 
-func (f *fakePoller) ListByLabels(_ context.Context, repo string, _ []string) ([]github.Issue, error) {
+func (f *fakePoller) ListByLabels(_ context.Context, repo string, _ []string, _ string) ([]github.Issue, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
-		return nil, f.listErr
+		return nil, "", f.listErr
 	}
-	return append([]github.Issue(nil), f.issues[repo]...), nil
+	return append([]github.Issue(nil), f.issues[repo]...), "", nil
 }
 
 func (f *fakePoller) TransitionLabel(_ context.Context, repo string, issue int, from, to string) error {
@@ -654,5 +654,55 @@ func TestListByLabelsErro(t *testing.T) {
 
 	if got := len(fr.called()); got != 0 {
 		t.Errorf("esperava 0 chamadas ao runner com erro de lista, got %d", got)
+	}
+}
+
+// TestBackoffRateLimit: 429 de ListByLabels → backoffUntil setado no Scheduler.
+func TestBackoffRateLimit(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{}
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	fp.listErr = &github.APIError{StatusCode: 429}
+
+	before := time.Now()
+	sched := newSched(st, fp, fr, cfg)
+	sched.processRepo(ctx, "web")
+
+	if sched.backoffUntil.IsZero() {
+		t.Fatal("esperava backoffUntil setado após 429")
+	}
+	if !sched.backoffUntil.After(before) {
+		t.Errorf("backoffUntil %v não está no futuro", sched.backoffUntil)
+	}
+}
+
+// TestBackoffSkipsTick: com backoffUntil no futuro, processTick não chama ListByLabels.
+func TestBackoffSkipsTick(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	fp := newFakePoller()
+	fr := &fakeRunner{}
+	cfg := newTestConfig()
+
+	if err := st.EnsureRepo(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	fp.issues["web"] = []github.Issue{
+		{Repo: "web", Number: 99, Labels: []string{domain.LabelReady}},
+	}
+
+	sched := newSched(st, fp, fr, cfg)
+	sched.backoffUntil = time.Now().Add(1 * time.Hour)
+	sched.processTick(ctx)
+	time.Sleep(30 * time.Millisecond)
+
+	if got := len(fr.called()); got != 0 {
+		t.Errorf("esperava 0 chamadas ao runner durante backoff, got %d", got)
 	}
 }

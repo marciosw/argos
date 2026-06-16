@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,9 @@ import (
 	"strconv"
 	"time"
 )
+
+// ErrNotModified é retornado por doConditional quando o servidor responde 304.
+var ErrNotModified = errors.New("github: not modified")
 
 const (
 	hdrAccept     = "application/vnd.github+json"
@@ -85,7 +89,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 	var lastRL *RateLimit
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		rl, retry, retryAfter, err := c.once(ctx, method, path, bodyBytes, out)
+		rl, _, retry, retryAfter, err := c.once(ctx, method, path, bodyBytes, out, "")
 		if rl != nil {
 			lastRL = rl
 		}
@@ -110,9 +114,44 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 	return lastRL, lastErr
 }
 
-// once executa uma única tentativa. Retorna (rateLimit, shouldRetry, retryAfter, error).
-// retryAfter == -1 significa "usar backoff padrão".
-func (c *Client) once(ctx context.Context, method, path string, bodyBytes []byte, out interface{}) (*RateLimit, bool, time.Duration, error) {
+// doConditional executa um GET condicional com If-None-Match.
+// Retorna (rl, newETag, nil) em 200 e (nil, ifNoneMatch, ErrNotModified) em 304.
+func (c *Client) doConditional(ctx context.Context, path, ifNoneMatch string, out interface{}) (*RateLimit, string, error) {
+	var lastRL *RateLimit
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		rl, responseETag, retry, retryAfter, err := c.once(ctx, "GET", path, nil, out, ifNoneMatch)
+		if rl != nil {
+			lastRL = rl
+		}
+		if err == nil {
+			return lastRL, responseETag, nil
+		}
+		if errors.Is(err, ErrNotModified) {
+			return nil, ifNoneMatch, ErrNotModified
+		}
+		lastErr = err
+		if !retry || attempt+1 >= maxRetries {
+			break
+		}
+		wait := retryAfter
+		if wait < 0 {
+			wait = c.backoff(attempt)
+		}
+		slog.Warn("github: retry", "attempt", attempt+1, "wait", wait, "path", path, "error", err)
+		select {
+		case <-ctx.Done():
+			return lastRL, "", ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return lastRL, "", lastErr
+}
+
+// once executa uma única tentativa. Retorna (rateLimit, responseETag, shouldRetry, retryAfter, error).
+// retryAfter == -1 significa "usar backoff padrão". ifNoneMatch, se não-vazio, é enviado como
+// header If-None-Match; 304 retorna ErrNotModified (shouldRetry=false).
+func (c *Client) once(ctx context.Context, method, path string, bodyBytes []byte, out interface{}, ifNoneMatch string) (*RateLimit, string, bool, time.Duration, error) {
 	var reqBody io.Reader
 	if len(bodyBytes) > 0 {
 		reqBody = bytes.NewReader(bodyBytes)
@@ -120,7 +159,7 @@ func (c *Client) once(ctx context.Context, method, path string, bodyBytes []byte
 
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reqBody)
 	if err != nil {
-		return nil, false, -1, fmt.Errorf("github: new request: %w", err)
+		return nil, "", false, -1, fmt.Errorf("github: new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", hdrAccept)
@@ -128,10 +167,13 @@ func (c *Client) once(ctx context.Context, method, path string, bodyBytes []byte
 	if len(bodyBytes) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, true, -1, fmt.Errorf("github: %s %s: %w", method, path, err)
+		return nil, "", true, -1, fmt.Errorf("github: %s %s: %w", method, path, err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -139,22 +181,25 @@ func (c *Client) once(ctx context.Context, method, path string, bodyBytes []byte
 	}()
 
 	rl := parseRateLimit(resp)
+	responseETag := resp.Header.Get("ETag")
 
 	switch {
+	case resp.StatusCode == http.StatusNotModified:
+		return nil, "", false, -1, ErrNotModified
 	case resp.StatusCode == 429:
-		return rl, true, parseRetryAfter(resp), &APIError{StatusCode: 429, Message: "rate limited"}
+		return rl, "", true, parseRetryAfter(resp), &APIError{StatusCode: 429, Message: "rate limited"}
 	case resp.StatusCode >= 500:
-		return rl, true, -1, &APIError{StatusCode: resp.StatusCode, Message: "server error"}
+		return rl, "", true, -1, &APIError{StatusCode: resp.StatusCode, Message: "server error"}
 	case resp.StatusCode >= 400:
-		return rl, false, -1, &APIError{StatusCode: resp.StatusCode, Message: readMsg(resp.Body)}
+		return rl, "", false, -1, &APIError{StatusCode: resp.StatusCode, Message: readMsg(resp.Body)}
 	}
 
 	if out != nil && resp.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return rl, false, -1, fmt.Errorf("github: decode %s %s: %w", method, path, err)
+			return rl, responseETag, false, -1, fmt.Errorf("github: decode %s %s: %w", method, path, err)
 		}
 	}
-	return rl, false, -1, nil
+	return rl, responseETag, false, -1, nil
 }
 
 func parseRateLimit(resp *http.Response) *RateLimit {

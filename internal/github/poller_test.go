@@ -60,7 +60,7 @@ func TestListByLabels(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	issues, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready", "todo"})
+	issues, _, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready", "todo"}, "")
 	if err != nil {
 		t.Fatalf("ListByLabels: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestListByLabelsEmpty(t *testing.T) {
 		writeJSON(w, []ghIssue{})
 	})
 	p := newTestPoller(t, handler)
-	issues, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready"})
+	issues, _, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready"}, "")
 	if err != nil {
 		t.Fatalf("ListByLabels: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestListByLabelsEmpty(t *testing.T) {
 
 func TestListByLabelsUnknownRepo(t *testing.T) {
 	p := newTestPoller(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	_, err := p.ListByLabels(context.Background(), "nonexistent", []string{"todo"})
+	_, _, err := p.ListByLabels(context.Background(), "nonexistent", []string{"todo"}, "")
 	if err == nil {
 		t.Fatal("expected error for unknown repo")
 	}
@@ -209,7 +209,7 @@ func TestRetry429(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	issues, err := p.ListByLabels(context.Background(), "web", []string{"todo"})
+	issues, _, err := p.ListByLabels(context.Background(), "web", []string{"todo"}, "")
 	if err != nil {
 		t.Fatalf("ListByLabels after retry: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRetry429WithRetryAfter(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	_, err := p.ListByLabels(context.Background(), "web", []string{"todo"})
+	_, _, err := p.ListByLabels(context.Background(), "web", []string{"todo"}, "")
 	if err != nil {
 		t.Fatalf("ListByLabels: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestRetry5xx(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	_, err := p.ListByLabels(context.Background(), "web", []string{"todo"})
+	_, _, err := p.ListByLabels(context.Background(), "web", []string{"todo"}, "")
 	if err != nil {
 		t.Fatalf("ListByLabels after 5xx retry: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestRetryExhausted(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	_, err := p.ListByLabels(context.Background(), "web", []string{"todo"})
+	_, _, err := p.ListByLabels(context.Background(), "web", []string{"todo"}, "")
 	if err == nil {
 		t.Fatal("expected error after retries exhausted")
 	}
@@ -290,7 +290,7 @@ func TestNo4xxRetry(t *testing.T) {
 	})
 
 	p := newTestPoller(t, handler)
-	_, err := p.ListByLabels(context.Background(), "web", []string{"todo"})
+	_, _, err := p.ListByLabels(context.Background(), "web", []string{"todo"}, "")
 	if err == nil {
 		t.Fatal("expected error on 422")
 	}
@@ -400,5 +400,70 @@ func TestOpenPRBranchNotFound(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when branch not found")
+	}
+}
+
+// --- Conditional ETag ---------------------------------------------------------
+
+// TestListByLabelsETagSentAndReturned: 200 com ETag → envia If-None-Match na
+// segunda chamada e retorna o novo ETag.
+func TestListByLabelsETagSentAndReturned(t *testing.T) {
+	const serverETag = `"abc123"`
+	var receivedIfNoneMatch string
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedIfNoneMatch = r.Header.Get("If-None-Match")
+		w.Header().Set("ETag", serverETag)
+		writeJSON(w, []ghIssue{
+			{Number: 1, Title: "feat", Labels: []ghLabel{{Name: "agent:ready"}}},
+		})
+	})
+
+	p := newTestPoller(t, handler)
+	// Primeira chamada sem ETag.
+	issues, newETag, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready"}, "")
+	if err != nil {
+		t.Fatalf("primeira ListByLabels: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("esperava 1 issue, got %d", len(issues))
+	}
+	if newETag != serverETag {
+		t.Errorf("newETag = %q, want %q", newETag, serverETag)
+	}
+	if receivedIfNoneMatch != "" {
+		t.Errorf("If-None-Match enviado na primeira chamada: %q", receivedIfNoneMatch)
+	}
+
+	// Segunda chamada com ETag recebido.
+	receivedIfNoneMatch = ""
+	_, _, _ = p.ListByLabels(context.Background(), "web", []string{"agent:ready"}, newETag)
+	if receivedIfNoneMatch != serverETag {
+		t.Errorf("If-None-Match = %q, want %q", receivedIfNoneMatch, serverETag)
+	}
+}
+
+// TestListByLabels304: servidor responde 304 → retorna (nil, etag, nil).
+func TestListByLabels304(t *testing.T) {
+	const clientETag = `"xyz"`
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == clientETag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writeJSON(w, []ghIssue{})
+	})
+
+	p := newTestPoller(t, handler)
+	issues, retETag, err := p.ListByLabels(context.Background(), "web", []string{"agent:ready"}, clientETag)
+	if err != nil {
+		t.Fatalf("ListByLabels 304: %v", err)
+	}
+	if issues != nil {
+		t.Errorf("esperava nil issues em 304, got %v", issues)
+	}
+	if retETag != clientETag {
+		t.Errorf("ETag retornado = %q, want %q (original preservado)", retETag, clientETag)
 	}
 }

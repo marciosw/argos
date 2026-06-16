@@ -28,6 +28,9 @@ type Scheduler struct {
 	// sem é o semáforo de concorrência: capacidade = cfg.MaxConcurrentTasks.
 	// Adquirido no caller antes de lançar goroutine; liberado dentro da goroutine.
 	sem chan struct{}
+	// backoffUntil indica até quando os ticks de polling devem ser ignorados
+	// por causa de rate limit (429) recebido de qualquer repo.
+	backoffUntil time.Time
 }
 
 // New cria um Scheduler com o semáforo dimensionado por cfg.MaxConcurrentTasks.
@@ -79,8 +82,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 // processTick é executado a cada tick: reap de locks expirados e processamento
-// de cada repo ativo.
+// de cada repo ativo. Pula o tick inteiro se ainda estiver em backoff de rate limit.
 func (s *Scheduler) processTick(ctx context.Context) {
+	if !s.backoffUntil.IsZero() && time.Now().Before(s.backoffUntil) {
+		slog.Debug("scheduler: em backoff de rate limit, tick ignorado", "until", s.backoffUntil)
+		return
+	}
+
 	if n, err := s.store.ReapExpiredLocks(ctx, time.Now()); err != nil {
 		slog.Warn("scheduler: ReapExpiredLocks", "err", err)
 	} else if n > 0 {

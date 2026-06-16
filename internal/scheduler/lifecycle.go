@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/marciomacedo/argos/internal/domain"
 	"github.com/marciomacedo/argos/internal/github"
@@ -12,11 +13,29 @@ import (
 )
 
 // processRepo lista issues elegíveis do repo e despacha conforme o label dominante.
+// Usa ETag do store para requisição condicional; persiste o cursor após 200;
+// seta backoffUntil no Scheduler em caso de 429.
 func (s *Scheduler) processRepo(ctx context.Context, repo string) {
-	issues, err := s.poller.ListByLabels(ctx, repo, []string{domain.LabelReady, domain.LabelTodo})
+	state, _ := s.store.GetRepoState(ctx, repo)
+
+	issues, newETag, err := s.poller.ListByLabels(ctx, repo, []string{domain.LabelReady, domain.LabelTodo}, state.ETag)
 	if err != nil {
-		slog.Error("scheduler: ListByLabels", "repo", repo, "err", err)
+		var apiErr *github.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
+			s.backoffUntil = time.Now().Add(2 * s.cfg.PollInterval.Std())
+			slog.Warn("scheduler: rate limited, aplicando backoff", "repo", repo, "until", s.backoffUntil)
+		} else {
+			slog.Error("scheduler: ListByLabels", "repo", repo, "err", err)
+		}
 		return
+	}
+	if issues == nil {
+		slog.Debug("scheduler: ListByLabels não modificado (304)", "repo", repo, "etag", state.ETag)
+		return
+	}
+
+	if err := s.store.UpdatePollCursor(ctx, repo, time.Now(), newETag); err != nil {
+		slog.Warn("scheduler: UpdatePollCursor", "repo", repo, "err", err)
 	}
 
 	for _, iss := range issues {

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -44,7 +45,10 @@ type PullRequest struct {
 // Poller executa as operações de GitHub determinadas pelo Scheduler.
 // Não decide transições de negócio (ver github_poller.md §1).
 type Poller interface {
-	ListByLabels(ctx context.Context, repo string, labels []string) ([]Issue, error)
+	// ListByLabels lista issues abertas com qualquer das labels (OR), usando
+	// requisição condicional se etag != "". Retorna (nil, etag, nil) em 304
+	// (sem mudanças); retorna (issues, newETag, nil) em 200.
+	ListByLabels(ctx context.Context, repo string, labels []string, etag string) ([]Issue, string, error)
 	GetIssue(ctx context.Context, repo string, issue int) (Issue, error)
 	TransitionLabel(ctx context.Context, repo string, issue int, fromLabel, toLabel string) error
 	SetLabel(ctx context.Context, repo string, issue int, label string) error
@@ -99,11 +103,13 @@ type ghLabel struct {
 
 // --- Poller ------------------------------------------------------------------
 
-// ListByLabels lista issues abertas que contenham qualquer uma das labels (OR).
-func (p *poller) ListByLabels(ctx context.Context, repo string, labels []string) ([]Issue, error) {
+// ListByLabels lista issues abertas com qualquer das labels (OR).
+// Se etag != "", envia If-None-Match e retorna (nil, etag, nil) em 304.
+// Em 200 retorna (issues, newETag, nil).
+func (p *poller) ListByLabels(ctx context.Context, repo string, labels []string, etag string) ([]Issue, string, error) {
 	base, err := p.repoBase(repo)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	q := url.Values{
 		"state":    {"open"},
@@ -111,8 +117,13 @@ func (p *poller) ListByLabels(ctx context.Context, repo string, labels []string)
 		"per_page": {"100"},
 	}
 	var raw []ghIssue
-	if _, err := p.client.do(ctx, "GET", base+"/issues?"+q.Encode(), nil, &raw); err != nil {
-		return nil, fmt.Errorf("github: ListByLabels %s: %w", repo, err)
+	_, newETag, err := p.client.doConditional(ctx, base+"/issues?"+q.Encode(), etag, &raw)
+	if err != nil {
+		if errors.Is(err, ErrNotModified) {
+			slog.Debug("github: ListByLabels 304 not modified", "repo", repo, "etag", etag)
+			return nil, etag, nil
+		}
+		return nil, "", fmt.Errorf("github: ListByLabels %s: %w", repo, err)
 	}
 	out := make([]Issue, 0, len(raw))
 	for _, r := range raw {
@@ -130,8 +141,8 @@ func (p *poller) ListByLabels(ctx context.Context, repo string, labels []string)
 			URL:       r.HTMLURL,
 		})
 	}
-	slog.Debug("github: ListByLabels", "repo", repo, "labels", labels, "found", len(out))
-	return out, nil
+	slog.Debug("github: ListByLabels", "repo", repo, "labels", labels, "found", len(out), "etag", newETag)
+	return out, newETag, nil
 }
 
 // GetIssue busca uma issue específica (inclui o corpo/Body, usado pelo
