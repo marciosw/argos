@@ -101,7 +101,36 @@ transcript original (ver task_runner.md §6).
 - `go vet ./...` → limpo.
 - Token nunca logado; lido do ambiente via `os.Getenv(cfg.TokenEnv)`.
 
-### Sessão 3 — por onde começar
+## Sessão 3 — concluída em 2026-06-16
+
+### Concluído
+
+- **`internal/domain/types.go`** — adicionado campo `Phase domain.Phase` a `Task` (única alteração permitida no domain nesta sessão).
+- **`internal/scheduler/runner.go`** — interface `TaskRunner` que desacopla o scheduler do runner real (Sessão 4+).
+- **`internal/scheduler/scheduler.go`** — `Scheduler` struct + `New` + `Run` (loop com ticker + canal de comandos + `ctx.Done`) + `processTick` (ReapExpiredLocks + ListActiveRepos + processRepo por repo ativo) + `handleCommand` (CmdApprove, CmdReject, CmdPause, CmdResume; CmdStatus/CmdRun como stubs logados) + `findIssue` (busca em todos os repos configurados).
+- **`internal/scheduler/lifecycle.go`** — `processRepo` (ListByLabels filtrando LabelReady/LabelTodo), `handleReady` (UpsertIssue → AcquireLock → TransitionLabel ready→documentation → SetPhase → semáforo → goroutine → SetPhase awaiting_approval ou error + ReleaseLock), `handleTodo` (AcquireLock → TransitionLabel todo→doing → SetPhase → semáforo → goroutine → TransitionLabel doing→done + SetPhase done ou error + ReleaseLock).
+- **`internal/scheduler/scheduler_test.go`** — 8 testes com fakes (sem biblioteca de mock):
+  - `TestHandleReady`: agent:ready → TransitionLabel chamado + runner invocado com Phase=documentation.
+  - `TestHandleTodo`: todo → runner invocado com Phase=doing.
+  - `TestRepoPausado`: repo pausado → processRepo não despachado.
+  - `TestLockJaExistente`: lock pré-existente → skip sem dispatch.
+  - `TestSemaforoLimita`: max_concurrent_tasks=1 → segunda issue bloqueia até primeira terminar.
+  - `TestCmdApprove`: /approve #N → SetPhase(todo) + TransitionLabel.
+  - `TestCmdPause`: /pause repo → SetRepoPaused(true).
+  - `TestListByLabelsErro`: ListByLabels com erro → sem panic.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK.
+- `CGO_ENABLED=0 go test ./...` → **todos passando** (config + domain + github + scheduler + store).
+
+### Decisões tomadas nesta sessão
+
+1. Semáforo adquirido **no caller** (antes de lançar a goroutine), liberado **dentro da goroutine** — o número de goroutines lançadas já reflete o limite.
+2. `handleTodo` faz UpsertIssue quando a issue não está no store, para tolerância a tick de polling que chega antes da issue ter sido registrada via `handleReady`.
+3. `findIssue` itera `cfg.GitHub.Repos` (sem ordem garantida em map Go) — OK porque os números de issue são únicos por repo neste projeto.
+
+## Sessão 4 — por onde começar
 
 - **Pacote a implementar**: `internal/scheduler/` (design.md §4 e §8; seguir
   design.md §3 e §6 para o loop + máquina de estados).

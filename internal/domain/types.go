@@ -164,6 +164,7 @@ type ModelConfig struct {
 type Task struct {
 	Repo          string
 	Issue         int
+	Phase         Phase  // fase em que a tarefa será executada (documentation ou doing)
 	RepoPath      string // checkout local do repo-alvo
 	Model         string // resolvido pelo ConfigManager
 	ContextWindow int    // janela do modelo (tokens)
