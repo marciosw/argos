@@ -81,6 +81,8 @@ type fakeGitHub struct {
 	openErr  error
 	opened   []github.OpenPRInput
 	comments []string
+	issue    github.Issue
+	issueErr error
 }
 
 func (f *fakeGitHub) OpenPR(_ context.Context, _ string, in github.OpenPRInput) (github.PullRequest, error) {
@@ -90,6 +92,21 @@ func (f *fakeGitHub) OpenPR(_ context.Context, _ string, in github.OpenPRInput) 
 func (f *fakeGitHub) Comment(_ context.Context, _ string, _ int, body string) error {
 	f.comments = append(f.comments, body)
 	return nil
+}
+func (f *fakeGitHub) GetIssue(_ context.Context, _ string, _ int) (github.Issue, error) {
+	return f.issue, f.issueErr
+}
+
+// fakeWorkspace devolve um caminho de checkout pré-fabricado (o tempdir do teste).
+type fakeWorkspace struct {
+	path  string
+	repos []string
+	err   error
+}
+
+func (f *fakeWorkspace) Prepare(_ context.Context, repo string) (string, error) {
+	f.repos = append(f.repos, repo)
+	return f.path, f.err
 }
 
 type fakeNotifier struct {
@@ -247,10 +264,10 @@ func TestRunDocumentation(t *testing.T) {
 	git := &fakeGit{}
 	gh := &fakeGitHub{}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, git, gh, nt)
+	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath})
 
 	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
-		RepoPath: repoPath, Model: "claude-test", ContextWindow: 200000}
+		Model: "claude-test", ContextWindow: 200000}
 
 	if err := r.Run(ctx, task); err != nil {
 		t.Fatalf("Run documentation: %v", err)
@@ -295,6 +312,108 @@ func TestRunDocumentation(t *testing.T) {
 	}
 }
 
+// ─── workspace + context.md ──────────────────────────────────────────────────────
+
+// TestRunUsesWorkspacePath garante que o runner pede o checkout ao workspace e
+// usa o caminho devolvido como working dir do subprocesso (RepoPath fiado aqui).
+func TestRunUsesWorkspacePath(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	cfg := newTestConfig(t)
+	repoPath := t.TempDir()
+
+	createIssue(t, st, "web", 42, "feat ws", domain.PhaseDocumentation)
+
+	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
+	ws := &fakeWorkspace{path: repoPath}
+	gh := &fakeGitHub{issue: github.Issue{Body: "qualquer"}}
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, ws)
+
+	// Task SEM RepoPath: deve ser resolvido pelo workspace.
+	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
+		Model: "claude-test", ContextWindow: 200000}
+
+	if err := r.Run(ctx, task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(ws.repos) != 1 || ws.repos[0] != "web" {
+		t.Errorf("esperava Prepare(\"web\"), got %v", ws.repos)
+	}
+	if len(cmd.dirs) != 1 || cmd.dirs[0] != repoPath {
+		t.Errorf("subprocesso deveria rodar em %q (do workspace), got %v", repoPath, cmd.dirs)
+	}
+}
+
+// TestRunSeedsContext garante que context.md é semeado com o corpo da issue na
+// fase de documentação.
+func TestRunSeedsContext(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	cfg := newTestConfig(t)
+	repoPath := t.TempDir()
+
+	createIssue(t, st, "web", 42, "feat ctx", domain.PhaseDocumentation)
+
+	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
+	gh := &fakeGitHub{issue: github.Issue{Body: "Permitir login social com Google."}}
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
+
+	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
+		Model: "claude-test", ContextWindow: 200000}
+
+	if err := r.Run(ctx, task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repoPath, "docs", "specs", "issue-42", "context.md"))
+	if err != nil {
+		t.Fatalf("ler context.md: %v", err)
+	}
+	if !strings.Contains(string(data), "Permitir login social com Google.") {
+		t.Errorf("context.md não contém o corpo da issue:\n%s", data)
+	}
+}
+
+// TestSeedContextPreservesExisting garante que conteúdo prévio (ex.: motivo de
+// /reject) NÃO é sobrescrito pela semeadura.
+func TestSeedContextPreservesExisting(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	cfg := newTestConfig(t)
+	repoPath := t.TempDir()
+
+	specDir := filepath.Join(repoPath, "docs", "specs", "issue-42")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const prev = "## /reject\nMotivo: faltou tratar erro de rede."
+	if err := os.WriteFile(filepath.Join(specDir, "context.md"), []byte(prev), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	createIssue(t, st, "web", 42, "feat ctx", domain.PhaseDocumentation)
+
+	cmd := &fakeCmd{linesByCall: [][]string{streamLines(Usage{InputTokens: 100}, true)}}
+	gh := &fakeGitHub{issue: github.Issue{Body: "corpo novo da issue"}}
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, gh, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
+
+	task := domain.Task{Repo: "web", Issue: 42, Phase: domain.PhaseDocumentation,
+		Model: "claude-test", ContextWindow: 200000}
+
+	if err := r.Run(ctx, task); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(specDir, "context.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != prev {
+		t.Errorf("context.md foi sobrescrito; esperava preservar %q, got %q", prev, string(data))
+	}
+}
+
 // ─── Run: doing ─────────────────────────────────────────────────────────────────
 
 func TestRunCoding(t *testing.T) {
@@ -309,10 +428,10 @@ func TestRunCoding(t *testing.T) {
 	git := &fakeGit{commits: 3}
 	gh := &fakeGitHub{pr: github.PullRequest{Number: 9, URL: "http://gh/pull/9"}}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, git, gh, nt)
+	r := newWithDeps(cfg, st, cmd, git, gh, nt, &fakeWorkspace{path: repoPath})
 
 	task := domain.Task{Repo: "web", Issue: 7, Phase: domain.PhaseDoing,
-		RepoPath: repoPath, Model: "claude-test", ContextWindow: 200000}
+		Model: "claude-test", ContextWindow: 200000}
 
 	if err := r.Run(ctx, task); err != nil {
 		t.Fatalf("Run coding: %v", err)
@@ -361,10 +480,10 @@ func TestRunResumesOnContext(t *testing.T) {
 	high := streamLines(Usage{CacheReadInputTokens: 180000}, true)
 	low := streamLines(Usage{InputTokens: 100}, true)
 	cmd := &fakeCmd{linesByCall: [][]string{high, low}}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, &fakeNotifier{})
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, &fakeNotifier{}, &fakeWorkspace{path: repoPath})
 
 	task := domain.Task{Repo: "web", Issue: 5, Phase: domain.PhaseDocumentation,
-		RepoPath: repoPath, Model: "claude-test", ContextWindow: 200000}
+		Model: "claude-test", ContextWindow: 200000}
 
 	if err := r.Run(ctx, task); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -440,10 +559,10 @@ func TestRunErrorPreservesProgress(t *testing.T) {
 
 	cmd := &fakeCmd{exitCode: 1, stderr: "boom", linesByCall: [][]string{streamLines(Usage{InputTokens: 1}, false)}}
 	nt := &fakeNotifier{}
-	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, nt)
+	r := newWithDeps(cfg, st, cmd, &fakeGit{}, &fakeGitHub{}, nt, &fakeWorkspace{path: repoPath})
 
 	task := domain.Task{Repo: "web", Issue: 3, Phase: domain.PhaseDocumentation,
-		RepoPath: repoPath, Model: "claude-test", ContextWindow: 200000}
+		Model: "claude-test", ContextWindow: 200000}
 
 	err := r.Run(ctx, task)
 	if err == nil {

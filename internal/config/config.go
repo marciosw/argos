@@ -35,15 +35,31 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // Config é a configuração raiz (espelha config.example.yaml).
 type Config struct {
-	DBPath             string         `yaml:"db_path"`
-	PollInterval       Duration       `yaml:"poll_interval"`
-	MaxConcurrentTasks int            `yaml:"max_concurrent_tasks"`
-	BaseBranch         string         `yaml:"base_branch"`
-	AgentBranchPrefix  string         `yaml:"agent_branch_prefix"`
-	LockLease          Duration       `yaml:"lock_lease"`
-	GitHub             GitHubConfig   `yaml:"github"`
-	Telegram           TelegramConfig `yaml:"telegram"`
-	Model              ModelSection   `yaml:"model"`
+	DBPath             string          `yaml:"db_path"`
+	PollInterval       Duration        `yaml:"poll_interval"`
+	MaxConcurrentTasks int             `yaml:"max_concurrent_tasks"`
+	BaseBranch         string          `yaml:"base_branch"`
+	AgentBranchPrefix  string          `yaml:"agent_branch_prefix"`
+	LockLease          Duration        `yaml:"lock_lease"`
+	LogLevel           string          `yaml:"log_level"`  // debug|info|warn|error
+	LogFormat          string          `yaml:"log_format"` // text|json
+	Workspace          WorkspaceConfig `yaml:"workspace"`
+	GitHub             GitHubConfig    `yaml:"github"`
+	Telegram           TelegramConfig  `yaml:"telegram"`
+	Model              ModelSection    `yaml:"model"`
+}
+
+// WorkspaceConfig configura os checkouts locais dos repos-alvo no disco
+// persistente da VM (design.md §12).
+type WorkspaceConfig struct {
+	// BaseDir é o diretório-raiz onde cada repo é clonado (subpasta por repo
+	// lógico: <base_dir>/<repo>).
+	BaseDir string `yaml:"base_dir"`
+	// GitHost é o host de clone (default "github.com").
+	GitHost string `yaml:"git_host"`
+	// CloneScheme é o esquema de clone: "https" (token via env, default) — o
+	// esquema "ssh" não é suportado nesta versão.
+	CloneScheme string `yaml:"clone_scheme"`
 }
 
 // GitHubConfig configura o cliente GitHub (token via env).
@@ -94,6 +110,11 @@ const (
 	DefaultBaseBranch       = "main"
 	DefaultBranchPrefix     = "agent/issue-"
 	DefaultMessageFormat    = "html"
+	DefaultLogLevel         = "info"
+	DefaultLogFormat        = "text"
+	DefaultWorkspaceBaseDir = "./checkouts"
+	DefaultGitHost          = "github.com"
+	DefaultCloneScheme      = "https"
 )
 
 // Load lê e parseia o arquivo de config e aplica os defaults faltantes. Um path
@@ -131,6 +152,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LockLease == 0 {
 		c.LockLease = Duration(DefaultLockLease)
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
+	}
+	if c.LogFormat == "" {
+		c.LogFormat = DefaultLogFormat
+	}
+	if c.Workspace.BaseDir == "" {
+		c.Workspace.BaseDir = DefaultWorkspaceBaseDir
+	}
+	if c.Workspace.GitHost == "" {
+		c.Workspace.GitHost = DefaultGitHost
+	}
+	if c.Workspace.CloneScheme == "" {
+		c.Workspace.CloneScheme = DefaultCloneScheme
 	}
 	if c.GitHub.APIBase == "" {
 		c.GitHub.APIBase = "https://api.github.com"

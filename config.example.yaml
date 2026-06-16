@@ -24,6 +24,20 @@ agent_branch_prefix: "agent/issue-"
 # Lease do lock de processamento por issue. Sugestão: ~2x o timeout de fase.
 lock_lease: "30m"
 
+# Logging estruturado (slog). Nível: debug|info|warn|error. Formato: text|json.
+log_level: "info"
+log_format: "text"
+
+# ----------------------------------------------------------------------------
+# Workspace — checkouts locais dos repos-alvo no disco persistente da VM
+# (design.md §12). Cada repo lógico é clonado em <base_dir>/<repo> e mantido
+# atualizado na branch base a cada despacho de tarefa.
+# ----------------------------------------------------------------------------
+workspace:
+  base_dir: "./checkouts"  # raiz dos checkouts (disco persistente na VM)
+  git_host: "github.com"   # host de clone
+  clone_scheme: "https"    # https (token via env, ler de github.token_env); ssh não suportado
+
 # ----------------------------------------------------------------------------
 # GitHub — fine-grained PAT com escopo mínimo por repo (Issues RW, Contents RW,
 # Pull requests RW). Ver github_poller.md §2.

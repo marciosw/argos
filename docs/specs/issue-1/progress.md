@@ -248,6 +248,80 @@ não foi necessário. A divergência (usage aninhado) **não muda o design**, s�
    `prClient`, `notifier`); `github.Poller` e `telegram.Gateway` as satisfazem. Store
    concreto (`:memory:` real nos testes, como no scheduler). Tokens/usage nunca logados.
 
+## Sessão 6 — concluída em 2026-06-16
+
+### Concluído
+
+- **`internal/workspace/`** (novo pacote) — gerência dos checkouts locais dos
+  repos-alvo no disco persistente da VM (design §12):
+  - `workspace.go` — `Manager` interface (`Prepare(ctx, repo) (path, err)`) +
+    impl `manager`. `Prepare` é idempotente: clona em `<base_dir>/<repo>` se
+    ausente (depois `checkout` da branch base); se presente, `fetch` +
+    `checkout` + `reset --hard origin/<base>`. Devolve caminho ABSOLUTO. URL de
+    clone derivada de `cfg.GitHub.Repos[repo]` (owner/name) — https com token
+    `x-access-token` (token nunca logado; só `repo`/`path`/`branch` em log).
+    `New(Options)` (git real) + `newWithGit` (fake nos testes).
+  - `git.go` — `gitClient` (interface injetável: Clone/Fetch/Checkout/ResetHard)
+    + `execGit` real sobre o binário git (mesmo padrão de `internal/runner/git.go`).
+  - `workspace_test.go` — 6 testes com fake de git: clone quando ausente,
+    fetch/checkout/reset quando presente, caminho absoluto correto, idempotência,
+    repo desconhecido → erro, URL de clone sem token.
+- **`internal/runner/runner.go`** (mudança ADITIVA): `Runner` ganhou
+  `ws workspacePreparer` (interface local, padrão das demais deps); `New` recebe
+  o `ws` como último parâmetro. `Run` chama `r.ws.Prepare(ctx, task.Repo)` no
+  início e atribui o resultado a `task.RepoPath` (fia o checkout sem tocar o
+  scheduler/`domain.Task`). Falha de `Prepare` → `NotifyError` + erro. Mantido o
+  fallback `.` quando `ws == nil`.
+  - `seedContext` — na fase `documentation`, semeia `context.md` com o corpo da
+    issue (via novo `gh.GetIssue`) **só se** o arquivo estiver vazio (preserva
+    motivos de `/reject`). Best-effort: falhas logadas, não abortam a fase.
+- **`internal/github/poller.go`** (aditivo): `GetIssue(ctx, repo, issue)
+  (Issue, error)` na interface `Poller` + impl (GET `/issues/{n}`, traz `Body`).
+- **`internal/config/config.go`** — novos campos: `log_level`, `log_format` e
+  bloco `workspace` (`base_dir`, `git_host`, `clone_scheme`) + defaults
+  (`info`/`text`/`./checkouts`/`github.com`/`https`). `config.example.yaml`
+  atualizado.
+- **`cmd/orchestrator/main.go`** (novo) — bootstrap long-running: flag
+  `--config`, `config.Load`, `slog` (texto/JSON + nível configurável),
+  `store.Open` + `EnsureRepo` por repo, `github.NewPollerFromConfig`, canal
+  `cmds` (buffer 32), `telegram.New`, `workspace.New` (token lido da env, nunca
+  logado), `runner.New`, `scheduler.New`. `signal.NotifyContext`
+  (SIGINT/SIGTERM) → cancela ctx; `gateway.Start` e `scheduler.Run` em
+  goroutines; shutdown aguarda ambas via `sync.WaitGroup` com teto de 30s.
+- **Testes do runner** (aditivos): `TestRunUsesWorkspacePath` (Prepare chamado +
+  RepoPath usado como `cmd.Dir`), `TestRunSeedsContext` (corpo da issue em
+  context.md), `TestSeedContextPreservesExisting` (não sobrescreve conteúdo
+  prévio). Fakes existentes ganharam `GetIssue` e `fakeWorkspace`.
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK. `CGO_ENABLED=0 go test ./...` → **todos
+  passando** (config + domain + github + runner + scheduler + store + telegram +
+  workspace). `go vet ./...` limpo, `gofmt` aplicado.
+- Smoke test do binário: sobe (`migration applied` + `em execução`), recebe
+  SIGTERM e encerra com `encerrado de forma graciosa` (exit 0). Teste com
+  `claude`/rede reais não executado (sem tokens/CLI no ambiente de CI).
+
+### Decisões tomadas nesta sessão
+
+1. **RepoPath fiado no runner** (opção recomendada): o `Runner` possui um
+   `workspacePreparer`; resolve o checkout no início de `Run` e popula
+   `task.RepoPath` localmente. **Nenhum pacote congelado alterado** —
+   `scheduler`/`domain.Task` intactos; mudança em `runner.New` é aditiva
+   (só os testes do próprio runner chamavam `New`/`newWithDeps`).
+2. **Esquema de clone**: **https + token** (`x-access-token:<token>@host`), token
+   lido da env `github.token_env` (mesma do API client). Evita gestão de chaves
+   SSH na VM. `ssh` declarado como não suportado nesta versão. Layout da base:
+   `<base_dir>/<repo>` (subpasta por repo lógico). Branch base mantida atualizada
+   a cada `Prepare`.
+3. **Semeadura de context.md**: o runner busca o corpo via novo
+   `github.Poller.GetIssue` na fase `documentation` e escreve em `context.md`
+   **apenas se vazio** (preserva motivos de `/reject`). Best-effort.
+4. **Shutdown**: `signal.NotifyContext` cancela o ctx compartilhado;
+   `gateway.Start` faz `srv.Shutdown`, `scheduler.Run` retorna; `main` aguarda as
+   duas goroutines via `WaitGroup` com teto de 30s (log de warn se estourar).
+   Tasks em voo recebem o ctx cancelado (subprocesso `claude` → SIGTERM).
+
 ## Sessão 5 — por onde começar
 
 - **Pacote a implementar**: `internal/runner/` (task_runner.md).

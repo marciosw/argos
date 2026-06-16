@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/marciomacedo/argos/internal/config"
@@ -30,11 +31,20 @@ import (
 // loop infinito caso o uso nunca fique abaixo do limiar.
 const defaultMaxSessions = 8
 
-// prClient é o subconjunto do github.Poller usado pelo runner (abrir PR e
-// comentar na issue). github.Poller o satisfaz.
+// prClient é o subconjunto do github.Poller usado pelo runner (abrir PR,
+// comentar na issue e ler o corpo da issue para semear context.md).
+// github.Poller o satisfaz.
 type prClient interface {
 	OpenPR(ctx context.Context, repo string, in github.OpenPRInput) (github.PullRequest, error)
 	Comment(ctx context.Context, repo string, issue int, body string) error
+	GetIssue(ctx context.Context, repo string, issue int) (github.Issue, error)
+}
+
+// workspacePreparer garante o checkout local do repo-alvo e devolve seu caminho
+// absoluto. workspace.Manager o satisfaz (interface local p/ evitar acoplamento
+// de pacote, no padrão das demais dependências do runner).
+type workspacePreparer interface {
+	Prepare(ctx context.Context, repo string) (string, error)
 }
 
 // notifier é o subconjunto do telegram.Gateway usado pelo runner. A interface
@@ -53,19 +63,21 @@ type Runner struct {
 	git    gitOps
 	gh     prClient
 	notify notifier
+	ws     workspacePreparer
 
 	maxSessions int
 }
 
 // New cria um Runner com as implementações reais de subprocesso e git. As
-// dependências externas (store, github, telegram, config) são injetadas.
-func New(cfg *config.Config, st *store.Store, gh prClient, notify notifier) *Runner {
-	return newWithDeps(cfg, st, execRunner{killGrace: 10 * time.Second}, execGit{}, gh, notify)
+// dependências externas (store, github, telegram, workspace, config) são
+// injetadas. ws garante o checkout local do repo-alvo (RepoPath).
+func New(cfg *config.Config, st *store.Store, gh prClient, notify notifier, ws workspacePreparer) *Runner {
+	return newWithDeps(cfg, st, execRunner{killGrace: 10 * time.Second}, execGit{}, gh, notify, ws)
 }
 
 // newWithDeps é o construtor interno: injeta TODAS as dependências (usado nos
-// testes com fakes de subprocesso/git).
-func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git gitOps, gh prClient, notify notifier) *Runner {
+// testes com fakes de subprocesso/git/workspace).
+func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git gitOps, gh prClient, notify notifier, ws workspacePreparer) *Runner {
 	return &Runner{
 		cfg:         cfg,
 		store:       st,
@@ -73,6 +85,7 @@ func newWithDeps(cfg *config.Config, st *store.Store, cmd commandRunner, git git
 		git:         git,
 		gh:          gh,
 		notify:      notify,
+		ws:          ws,
 		maxSessions: defaultMaxSessions,
 	}
 }
@@ -86,6 +99,20 @@ func (r *Runner) Run(ctx context.Context, task domain.Task) error {
 	}
 
 	log := slog.With("repo", task.Repo, "issue", task.Issue, "phase", string(task.Phase))
+
+	// Resolve o checkout local do repo-alvo (clone/fetch idempotente) e usa-o
+	// como working dir. O scheduler (congelado) cria a Task sem RepoPath; é aqui
+	// que ele é fiado. Ver task_runner.md §11.4.
+	if r.ws != nil {
+		path, err := r.ws.Prepare(ctx, task.Repo)
+		if err != nil {
+			err = fmt.Errorf("runner: preparar checkout de %s: %w", task.Repo, err)
+			r.notifyError(ctx, task, err)
+			return err
+		}
+		task.RepoPath = path
+		log.Info("runner: checkout preparado", "path", path)
+	}
 
 	switch task.Phase {
 	case domain.PhaseDocumentation:
@@ -119,6 +146,11 @@ func (r *Runner) runDocumentation(ctx context.Context, task domain.Task, iss dom
 	if err := ensureSpecScaffold(specDir); err != nil {
 		return fmt.Errorf("runner: scaffold de specs: %w", err)
 	}
+
+	// Semeia context.md com o corpo da issue (objetivo de negócio) na fase de
+	// documentação. Best-effort: não bloqueia a fase e nunca sobrescreve
+	// conteúdo já existente (pode conter motivos de /reject). Ver task_runner.md §6.
+	r.seedContext(ctx, task, specDir, log)
 
 	if err := r.runPhaseLoop(ctx, task, iss, "", log); err != nil {
 		r.notifyError(ctx, task, err)
@@ -366,6 +398,40 @@ func ensureSpecScaffold(specDir string) error {
 		}
 	}
 	return nil
+}
+
+// seedContext semeia context.md com o corpo da issue. Só escreve se o arquivo
+// estiver vazio (preserva conteúdo prévio, ex.: motivos de /reject). Best-effort:
+// falhas são logadas e não abortam a fase.
+func (r *Runner) seedContext(ctx context.Context, task domain.Task, specDir string, log *slog.Logger) {
+	path := filepath.Join(specDir, "context.md")
+	if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		// Já tem conteúdo — não sobrescreve.
+		return
+	}
+	iss, err := r.gh.GetIssue(ctx, task.Repo, task.Issue)
+	if err != nil {
+		log.Warn("runner: GetIssue para semear context.md", "err", err)
+		return
+	}
+	body := strings.TrimSpace(iss.Body)
+	if body == "" {
+		body = "_(issue sem corpo)_"
+	}
+	content := fmt.Sprintf(`# context.md — issue #%d (%s)
+
+Semeado automaticamente pelo Argos com o corpo da issue (objetivo de negócio).
+Decisões do humano e motivos de /reject são acrescentados abaixo.
+
+## Corpo da issue
+
+%s
+`, task.Issue, task.Repo, body)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		log.Warn("runner: escrever context.md", "err", err)
+		return
+	}
+	log.Info("runner: context.md semeado com o corpo da issue")
 }
 
 // specFileNames são os arquivos de spec por issue (spec §6).

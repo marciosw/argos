@@ -181,9 +181,9 @@ func TestComputeTransition(t *testing.T) {
 		want    []string
 	}{
 		{[]string{"agent:ready", "bug"}, "agent:ready", "documentation", []string{"bug", "documentation"}},
-		{[]string{"documentation"}, "agent:ready", "documentation", []string{"documentation"}},        // noop set
-		{[]string{"bug"}, "agent:ready", "documentation", []string{"bug", "documentation"}},          // from absent, to added
-		{[]string{"agent:ready"}, "agent:ready", "todo", []string{"todo"}},                           // only from present
+		{[]string{"documentation"}, "agent:ready", "documentation", []string{"documentation"}}, // noop set
+		{[]string{"bug"}, "agent:ready", "documentation", []string{"bug", "documentation"}},    // from absent, to added
+		{[]string{"agent:ready"}, "agent:ready", "todo", []string{"todo"}},                     // only from present
 		{[]string{"doing", "agent:ready"}, "agent:ready", "documentation", []string{"doing", "documentation"}},
 	}
 	for _, tc := range cases {

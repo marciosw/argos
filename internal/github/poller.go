@@ -45,6 +45,7 @@ type PullRequest struct {
 // Não decide transições de negócio (ver github_poller.md §1).
 type Poller interface {
 	ListByLabels(ctx context.Context, repo string, labels []string) ([]Issue, error)
+	GetIssue(ctx context.Context, repo string, issue int) (Issue, error)
 	TransitionLabel(ctx context.Context, repo string, issue int, fromLabel, toLabel string) error
 	SetLabel(ctx context.Context, repo string, issue int, label string) error
 	ClearLabel(ctx context.Context, repo string, issue int, label string) error
@@ -131,6 +132,32 @@ func (p *poller) ListByLabels(ctx context.Context, repo string, labels []string)
 	}
 	slog.Debug("github: ListByLabels", "repo", repo, "labels", labels, "found", len(out))
 	return out, nil
+}
+
+// GetIssue busca uma issue específica (inclui o corpo/Body, usado pelo
+// TaskRunner para semear context.md).
+func (p *poller) GetIssue(ctx context.Context, repo string, issue int) (Issue, error) {
+	base, err := p.repoBase(repo)
+	if err != nil {
+		return Issue{}, err
+	}
+	var r ghIssue
+	if _, err := p.client.do(ctx, "GET", fmt.Sprintf("%s/issues/%d", base, issue), nil, &r); err != nil {
+		return Issue{}, fmt.Errorf("github: GetIssue %s#%d: %w", repo, issue, err)
+	}
+	lbls := make([]string, len(r.Labels))
+	for i, l := range r.Labels {
+		lbls[i] = l.Name
+	}
+	return Issue{
+		Repo:      repo,
+		Number:    r.Number,
+		Title:     r.Title,
+		Body:      r.Body,
+		Labels:    lbls,
+		UpdatedAt: r.UpdatedAt,
+		URL:       r.HTMLURL,
+	}, nil
 }
 
 // TransitionLabel remove fromLabel e adiciona toLabel de forma reconciliada:

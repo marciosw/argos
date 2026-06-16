@@ -17,11 +17,11 @@ import (
 // ─── fakes ────────────────────────────────────────────────────────────────────
 
 type fakePoller struct {
-	mu      sync.Mutex
-	issues  map[string][]github.Issue
-	labels  map[string][]string
+	mu       sync.Mutex
+	issues   map[string][]github.Issue
+	labels   map[string][]string
 	comments []string
-	listErr error
+	listErr  error
 }
 
 func newFakePoller() *fakePoller {
@@ -90,6 +90,17 @@ func (f *fakePoller) Comment(_ context.Context, _ string, _ int, body string) er
 
 func (f *fakePoller) OpenPR(_ context.Context, _ string, _ github.OpenPRInput) (github.PullRequest, error) {
 	return github.PullRequest{}, nil
+}
+
+func (f *fakePoller) GetIssue(_ context.Context, repo string, issue int) (github.Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, iss := range f.issues[repo] {
+		if iss.Number == issue {
+			return iss, nil
+		}
+	}
+	return github.Issue{Repo: repo, Number: issue}, nil
 }
 
 func (f *fakePoller) getLabels(repo string, issue int) []string {
