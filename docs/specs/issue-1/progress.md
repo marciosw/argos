@@ -322,6 +322,49 @@ não foi necessário. A divergência (usage aninhado) **não muda o design**, s�
    duas goroutines via `WaitGroup` com teto de 30s (log de warn se estourar).
    Tasks em voo recebem o ctx cancelado (subprocesso `claude` → SIGTERM).
 
+## Roadmap (próximas sessões)
+
+Registrado em 2026-06-16, após a Sessão 6. O Argos já roda ponta a ponta; o que
+falta para o v1 é fechar os portões humanos e empacotar o deploy.
+
+### Sessão 7 (recomendada) — portões de aprovação/rejeição + `/run`
+
+Objetivo: tornar o ciclo de aprovação/rejeição correto e persistido, e implementar
+`/run #N`. Gaps identificados na Sessão 6:
+
+1. **BUG central — issue rejeitada é beco sem saída.** `cmdReject` põe
+   `phase=documentation` mas NÃO transita a label; `processRepo`
+   (`lifecycle.go`) só lista `LabelReady`/`LabelTodo`, então uma issue rejeitada
+   (label `documentation`) nunca é reprocessada. Decidir a via (recomendado:
+   `/reject` transita a label de volta para `agent:ready`; alternativa:
+   `processRepo` também lista `documentation` e reprocessa quando
+   `phase==documentation` e não `awaiting_approval`).
+2. **Tabela `approvals` é código morto.** `OpenApproval`/`DecideApproval`/
+   `GetPendingApproval` existem no store mas SEM chamadores. Abrir aprovação ao
+   entrar em `awaiting_approval` (idempotente) e decidir em `/approve`/`/reject`.
+3. **Motivo de `/reject` no `context.md`** (CLAUDE.md). O scheduler não tem o
+   checkout (sem `workspace`); via recomendada: o runner lê o último motivo de
+   rejeição do store (query nova aditiva) e o ACRESCENTA ao `context.md` na
+   próxima fase de documentação, sem apagar o conteúdo existente.
+4. **`/run #N` (CmdRun)** — hoje stub em `handleCommand` (scheduler.go ~L124).
+   Força o processamento imediato conforme a fase (ready/todo dispara;
+   awaiting_approval aguarda humano), respeitando lock, semáforo e pausa.
+
+Nesta sessão o `internal/scheduler` fica DESCONGELADO para mudanças aditivas
+(`handleCommand`/`cmdApprove`/`cmdReject`/`processRepo` + `cmdRun`); o contrato
+`scheduler.TaskRunner` e `domain.Task` permanecem intactos. Modelo sugerido:
+Sonnet (Opus se a via de reprocessamento/`context.md` abrir ambiguidade real).
+
+### Sessão 8 (deferida) — polling eficiente + deploy
+
+1. **Polling com `ETag`/cursor + backoff** — ponto aberto §12.1 do design.
+   `RepoState.ETag`/`LastPolledAt` e `UpdatePollCursor` existem mas não são
+   usados; usar requisições condicionais (`If-None-Match`) para poupar rate limit.
+2. **Artefatos de deploy na VM** (design §12): unit `systemd`, `Caddyfile`
+   (TLS Let's Encrypt + reverse proxy → `:8080`) e runbook no `README.md`
+   (hoje praticamente vazio).
+3. **Teste E2E** com `claude`/rede reais (se viável no ambiente).
+
 ## Sessão 5 — por onde começar
 
 - **Pacote a implementar**: `internal/runner/` (task_runner.md).
