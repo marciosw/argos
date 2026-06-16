@@ -160,6 +160,94 @@ transcript original (ver task_runner.md §6).
 3. Handler retorna 200 antes de qualquer I/O pesado; goroutine usa `context.Background()` desacoplado do request.
 4. `sendDocument` usa `multipart/form-data`; em falha de leitura de arquivo, loga e continua com os demais (digest já enviado).
 
+## Sessão 5 — concluída em 2026-06-16
+
+### Portão de verificação (`claude --help` + run real de `stream-json`)
+
+Executado contra o CLI instalado (`claude` 2.1.178). **Flags da spec §2 confirmadas
+como reais**: `-p/--print`, `--model`, `--output-format stream-json`, `--verbose`,
+`--dangerously-skip-permissions`, `--add-dir`. Sem divergência de flags.
+
+Schema real do `stream-json` (run mínimo `echo prompt | claude -p --output-format
+stream-json --verbose`):
+
+- `{"type":"system","subtype":"init","session_id":...,"model":...,"tools":[...]}` —
+  traz `session_id` no nível superior; **sem `usage`**.
+- `{"type":"rate_limit_event",...}` — evento extra, tolerado/ignorado pelo parser.
+- `{"type":"assistant","message":{...,"usage":{...}},...}` — **o `usage` por turno vem
+  ANINHADO em `message.usage`**, não no nível superior (divergência vs. spec §3, que
+  o desenhava no topo do `StreamEvent`). Adotado o schema real: o parser lê
+  `message.usage` (assistant) e `usage` (result).
+- `{"type":"result","subtype":"success","is_error":false,"usage":{...},"total_cost_usd":...,
+  "modelUsage":{"<model>":{"contextWindow":200000,...}},...}` — `usage` no topo, igual
+  ao último turno; `is_error` discrimina falha; há até `modelUsage.<model>.contextWindow`
+  (não usado — a janela vem do ConfigManager).
+
+Campos de `Usage` da spec confirmados: `input_tokens`, `output_tokens`,
+`cache_read_input_tokens`, `cache_creation_input_tokens`. O fallback de §4 (sem `usage`)
+não foi necessário. A divergência (usage aninhado) **não muda o design**, só o mapeamento.
+
+### Concluído
+
+- **`internal/runner/exec.go`** — `commandRunner` (interface injetável) + `execRunner`
+  real: `exec.CommandContext` com `cmd.Dir`, prompt via **stdin**, `bufio.Scanner` com
+  buffer 8 MiB (linhas JSON grandes), stderr capturado, `Cancel`=SIGTERM + `WaitDelay`
+  (SIGKILL após carência). Exit ≠ 0 volta em `commandResult.ExitCode` (não como erro Go).
+- **`internal/runner/stream.go`** — `StreamEvent`/`streamMessage`/`Usage`, `streamParser`
+  (lê linha a linha, discrimina por `type`, captura `session_id` só p/ correlação, acumula
+  o último `usage` de `message.usage`|`usage`, tolera linhas malformadas, marca `sawResult`),
+  e `contextUsage(u, window) = (input+cache_read+cache_creation)/window`.
+- **`internal/runner/prompts.go`** — `text/template` versionados: documentação, codificação
+  e retomada (injeta `progress.md`+`context.md`).
+- **`internal/runner/digest.go`** — extração best-effort do `DigestData` a partir das seções
+  de `design.md` (Objetivos/Componentes/Decisões/Riscos), com placeholders se ausentes.
+- **`internal/runner/git.go`** — `gitOps` (interface) + `execGit`: `EnsureBranch`, `Push`
+  (`-u origin`, sem `--force`), `CountCommits` (`rev-list --count base..branch`).
+- **`internal/runner/runner.go`** — `Runner` + `New`/`newWithDeps` + `Run` (despacha por
+  `task.Phase`). `runDocumentation`: scaffold de specs, loop de sessões, `SetSpecDir`,
+  digest → `SendApprovalRequest`. `runCoding`: `EnsureBranch`, loop, `Push`, `OpenPR`,
+  `SetPRURL`, `Comment` na issue, `NotifyPR`. `runPhaseLoop`: cria sessão no store, roda
+  subprocesso, parseia, calcula uso; `uso > limiar` → encerra sessão (`resumed`), audita
+  `resumed_due_to_context`, abre **nova** sessão (reset deliberado, sem `--resume`); cap
+  `maxSessions` (8) evita loop infinito. Erros (exit≠0, sem `result`, `is_error`) →
+  `EndSession(failed)` + `NotifyError` + erro propagado, `progress.md` preservado.
+- **`internal/runner/runner_test.go`** — 8 testes com fakes (sem `claude` real): parser
+  (acúmulo de usage, malformado tolerado, sem `result`), `contextUsage` (abaixo/acima de
+  0.65), `Run` documentation (digest+arquivos+sessão+SpecDir), `Run` doing (branch/push/PR/
+  comentário/NotifyPR/PRURL), reinício por contexto (2 sessões, `resumed_from`,
+  `resumed_due_to_context`), erro exit≠0 (erro propagado, `progress.md` preservado,
+  `NotifyError`, sessão `failed`).
+
+### Estado atual
+
+- `CGO_ENABLED=0 go build ./...` → OK.
+- `CGO_ENABLED=0 go test ./...` → **todos passando** (config + domain + github + runner +
+  scheduler + store + telegram). `go vet ./...` limpo, `gofmt` aplicado.
+
+### Decisões tomadas nesta sessão
+
+1. **Efeitos de fim de fase DENTRO do runner** (confirmado contra `lifecycle.go`): `Run`
+   retorna só `error`, mantendo `scheduler.TaskRunner` intacto. O digest de aprovação
+   (documentation) e o PR+notificação (doing) acontecem antes de `Run` retornar; o
+   scheduler então faz as transições de label/fase a partir do sucesso/erro.
+2. **Prompt via stdin** (não `-p`), evitando o limite de tamanho de argumento (spec §11.2).
+   `--add-dir` dispensado: `cmd.Dir` = checkout já dá acesso ao cwd.
+3. **"Bloco de tasks" = uma invocação do subprocesso** (heurística simples, §11.3): ao
+   término de cada invocação checa-se o uso; abaixo do limiar = fase concluída no orçamento,
+   acima = retomada com contexto reiniciado. Cap `maxSessions=8` (constante no pacote, sem
+   campo novo na config) evita loop infinito; ao esgotar, prossegue com aviso (o humano
+   ainda gateia via aprovação/PR).
+4. **Checkout do repo-alvo**: `task.RepoPath` assumido resolvido pelo caller (fallback `.`).
+   **Pendência**: o scheduler ainda NÃO popula `RepoPath` (Task criada sem ele em
+   `lifecycle.go`); uma sessão futura precisa fiar a resolução de checkout (clone/worktree)
+   sem alterar o contrato congelado. Clone/worktree não implementados nesta sessão.
+5. **`context.md` semeado mínimo**: o runner cria o scaffold vazio; a semeadura com o corpo
+   da issue (spec §6) depende de o caller passar o body (Task não o carrega hoje) —
+   pendência registrada.
+6. Dependências injetadas por interfaces no pacote runner (`commandRunner`, `gitOps`,
+   `prClient`, `notifier`); `github.Poller` e `telegram.Gateway` as satisfazem. Store
+   concreto (`:memory:` real nos testes, como no scheduler). Tokens/usage nunca logados.
+
 ## Sessão 5 — por onde começar
 
 - **Pacote a implementar**: `internal/runner/` (task_runner.md).
