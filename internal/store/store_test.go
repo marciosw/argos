@@ -25,14 +25,14 @@ func TestMigrationsApply(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	// schema_migrations deve conter a versão 1.
+	// schema_migrations deve conter a versão 2 (0001_init + 0002_previews).
 	var version int
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("versão aplicada = %d, quero 1", version)
+	if version != 2 {
+		t.Fatalf("versão aplicada = %d, quero 2", version)
 	}
 
 	// Reabrir/migrar de novo deve ser idempotente (sem erro, sem duplicar).
@@ -430,5 +430,144 @@ func TestAudit(t *testing.T) {
 	s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM audit_log`).Scan(&n)
 	if n < 2 {
 		t.Fatalf("audit_log tem %d linhas, quero >=2", n)
+	}
+}
+
+func TestPreviewLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	issueID, _ := s.UpsertIssue(ctx, domain.RepoWeb, 5, "preview test", "", domain.PhaseDoing)
+
+	// Nenhum preview ativo inicialmente.
+	if _, err := s.GetActivePreview(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("quero ErrNotFound sem preview ativo, veio %v", err)
+	}
+
+	// Criar preview (starting).
+	pid, err := s.CreatePreview(ctx, issueID, domain.RepoWeb, 9000, 9001)
+	if err != nil || pid == 0 {
+		t.Fatalf("CreatePreview: id=%d err=%v", pid, err)
+	}
+
+	// Deve aparecer como ativo.
+	active, err := s.GetActivePreview(ctx)
+	if err != nil {
+		t.Fatalf("GetActivePreview: %v", err)
+	}
+	if active.ID != pid || active.Status != domain.PreviewStarting {
+		t.Fatalf("ativo inesperado: %+v", active)
+	}
+	if active.Port != 9000 || active.ExtraPort != 9001 {
+		t.Fatalf("portas: port=%d extra=%d", active.Port, active.ExtraPort)
+	}
+
+	// Marcar como running com URL.
+	if err := s.SetPreviewRunning(ctx, pid, "https://abc.trycloudflare.com"); err != nil {
+		t.Fatalf("SetPreviewRunning: %v", err)
+	}
+	active, _ = s.GetActivePreview(ctx)
+	if active.Status != domain.PreviewRunning || active.TunnelURL != "https://abc.trycloudflare.com" {
+		t.Fatalf("após running: %+v", active)
+	}
+
+	// GetPreviewByIssue encontra o preview.
+	byIssue, err := s.GetPreviewByIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("GetPreviewByIssue: %v", err)
+	}
+	if byIssue.ID != pid {
+		t.Fatalf("id por issue = %d, quero %d", byIssue.ID, pid)
+	}
+
+	// Parar por comando.
+	if err := s.StopPreview(ctx, pid, domain.PreviewStopped, domain.PreviewStopCommand); err != nil {
+		t.Fatalf("StopPreview: %v", err)
+	}
+
+	// Não está mais ativo.
+	if _, err := s.GetActivePreview(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("quero ErrNotFound após stop, veio %v", err)
+	}
+
+	// GetPreviewByIssue ainda encontra (status stopped).
+	byIssue, _ = s.GetPreviewByIssue(ctx, issueID)
+	if byIssue.Status != domain.PreviewStopped || byIssue.StopReason != domain.PreviewStopCommand {
+		t.Fatalf("preview parado inesperado: %+v", byIssue)
+	}
+	if byIssue.StoppedAt.IsZero() {
+		t.Fatal("stopped_at não preenchido")
+	}
+}
+
+func TestPreviewMarkStaleAndList(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	id1, _ := s.UpsertIssue(ctx, domain.RepoWeb, 11, "a", "", domain.PhaseDoing)
+	id2, _ := s.UpsertIssue(ctx, domain.RepoMobile, 12, "b", "", domain.PhaseDoing)
+
+	// Dois previews em estados transitórios simulando crash do Argos.
+	pid1, _ := s.CreatePreview(ctx, id1, domain.RepoWeb, 9000, 0)
+	pid2, _ := s.CreatePreview(ctx, id2, domain.RepoMobile, 9010, 0)
+	s.SetPreviewRunning(ctx, pid2, "https://xyz.trycloudflare.com")
+
+	// MarkStalePreviewsDead deve marcar os dois.
+	dead, err := s.MarkStalePreviewsDead(ctx)
+	if err != nil {
+		t.Fatalf("MarkStalePreviewsDead: %v", err)
+	}
+	if len(dead) != 2 {
+		t.Fatalf("mortos = %d, quero 2", len(dead))
+	}
+
+	// Após recovery, nenhum ativo.
+	if _, err := s.GetActivePreview(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("quero ErrNotFound após recovery, veio %v", err)
+	}
+
+	// Chamada idempotente (zero previews transitórios restantes).
+	dead2, err := s.MarkStalePreviewsDead(ctx)
+	if err != nil {
+		t.Fatalf("MarkStalePreviewsDead idempotente: %v", err)
+	}
+	if len(dead2) != 0 {
+		t.Fatalf("segunda passada marcou %d, quero 0", len(dead2))
+	}
+
+	// ListPreviews retorna todos (sem filtro).
+	all, err := s.ListPreviews(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListPreviews: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("listados = %d, quero 2", len(all))
+	}
+
+	// ListPreviews com filtro de status.
+	deadList, err := s.ListPreviews(ctx, []domain.PreviewStatus{domain.PreviewDead})
+	if err != nil {
+		t.Fatalf("ListPreviews dead: %v", err)
+	}
+	if len(deadList) != 2 {
+		t.Fatalf("dead listados = %d, quero 2", len(deadList))
+	}
+
+	// Filtro que não bate com nada.
+	running, _ := s.ListPreviews(ctx, []domain.PreviewStatus{domain.PreviewRunning})
+	if len(running) != 0 {
+		t.Fatalf("running = %d, quero 0", len(running))
+	}
+
+	// Verifica stop_reason = restart e ids presentes.
+	idSet := map[int64]bool{pid1: false, pid2: false}
+	for _, p := range deadList {
+		if p.StopReason != domain.PreviewStopRestart {
+			t.Fatalf("stop_reason = %q, quero restart", p.StopReason)
+		}
+		idSet[p.ID] = true
+	}
+	for pid, seen := range idSet {
+		if !seen {
+			t.Fatalf("preview %d não encontrado na lista", pid)
+		}
 	}
 }

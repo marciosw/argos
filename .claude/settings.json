@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go version *)",
+      "Bash(git checkout *)",
+      "Bash(go env *)",
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(gofmt -l -w internal/ migrations/)",
+      "Bash(go vet *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'feat\\(store,config,domain\\): sessão 1 — fundação \\(store + config + domain\\) *)",
+      "Bash(git config *)",
+      "Bash(kill 15122 15120)",
+      "Bash(rm -f .git/index.lock)",
+      "Bash(git -c commit.gpgsign=false commit -q -F -)",
+      "Bash(git -C /Users/marciomacedo/dev/github/argos add internal/github/ docs/specs/issue-1/progress.md)",
+      "Bash(git -c commit.gpgsign=false -C /Users/marciomacedo/dev/github/argos commit -m ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/marciomacedo/dev/github/argos/cmd"
+    ]
+  }
+}

@@ -75,6 +75,9 @@ telegram:
 | Retomar repo       | `/resume repo`       | Retoma o repo pausado. |
 | Status             | `/status`            | Resumo de todos os repos e issues em andamento. |
 | Executar agora     | `/run #N`            | Força processamento imediato da issue N (bypass do ciclo de polling). |
+| Preview            | `/preview #N`        | Sobe o servidor de dev do repo da issue N + túnel cloudflared; retorna URL HTTPS temporária. Substitui o preview anterior, se houver. |
+| Parar preview      | `/preview stop #N`   | Derruba o servidor de dev e o túnel da issue N. |
+| Status do preview  | `/preview status`    | Lista o preview ativo (URL e tempo restante). |
 
 ### Parsing
 
@@ -82,6 +85,7 @@ telegram:
 - `#N`: aceitar com ou sem `#` (`/approve 42` == `/approve #42`).
 - `motivo` em `/reject`: tudo após o número é o motivo (texto livre, pode ter espaços).
 - `repo` em `/pause`/`/resume`: validar contra `{web, mobile, hybrid}`; responder erro amigável se inválido.
+- `/preview`: subcomandos `stop` e `status`. `/preview #N` (start) e `/preview stop #N` exigem `#N`; `/preview status` não recebe argumento. Implementado em `internal/preview/` — detalhes em [docs/specs/sprints/preview-v1.1/design.md](sprints/preview-v1.1/design.md).
 - Comando desconhecido / argumentos faltando → mensagem de ajuda contextual.
 
 ### Validações de estado

@@ -82,7 +82,7 @@ func parseCommand(text string, chatID int64) (domain.Command, error) {
 
 	default:
 		return domain.Command{}, fmt.Errorf(
-			"comando desconhecido %q\nComandos disponiveis: /approve, /reject, /pause, /resume, /status, /run",
+			"comando desconhecido %q\nComandos disponiveis: /approve, /reject, /pause, /resume, /status, /run, /preview",
 			cmd,
 		)
 	}
@@ -99,6 +99,93 @@ func parseIssueNum(args []string) (int, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("numero de issue invalido: %q (ex: #42 ou 42)", args[0])
+	}
+	return n, nil
+}
+
+// ============================ /preview ==============================
+
+// PreviewAction é a sub-ação do comando /preview.
+type PreviewAction string
+
+const (
+	PreviewStart  PreviewAction = "start"
+	PreviewStop   PreviewAction = "stop"
+	PreviewStatus PreviewAction = "status"
+)
+
+// PreviewCommand é um comando /preview já parseado.
+type PreviewCommand struct {
+	Action  PreviewAction
+	IssueID int // para start/stop; 0 para status
+	ChatID  int64
+}
+
+// parsePreviewCommand tenta parsear text como /preview [...].
+//   - Retorna (zero, false, nil) se o texto não começa com /preview.
+//   - Retorna (zero, true, err) se começa com /preview mas tem erro de sintaxe.
+//   - Retorna (cmd, true, nil) em caso de sucesso.
+func parsePreviewCommand(text string, chatID int64) (PreviewCommand, bool, error) {
+	text = strings.TrimSpace(text)
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return PreviewCommand{}, false, nil
+	}
+
+	rawCmd := parts[0]
+	if idx := strings.IndexByte(rawCmd, '@'); idx >= 0 {
+		rawCmd = rawCmd[:idx]
+	}
+	if strings.ToLower(rawCmd) != "/preview" {
+		return PreviewCommand{}, false, nil
+	}
+
+	base := PreviewCommand{ChatID: chatID}
+	args := parts[1:]
+
+	if len(args) == 0 {
+		return PreviewCommand{}, true, fmt.Errorf(
+			"/preview: acao obrigatoria\nUso: /preview #N | /preview stop #N | /preview status")
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "status":
+		base.Action = PreviewStatus
+		return base, true, nil
+
+	case "stop":
+		if len(args) < 2 {
+			return PreviewCommand{}, true, fmt.Errorf(
+				"/preview stop: numero de issue obrigatorio (ex: /preview stop #42)")
+		}
+		n, err := parsePreviewIssueNum(args[1])
+		if err != nil {
+			return PreviewCommand{}, true, fmt.Errorf("/preview stop: %w", err)
+		}
+		base.Action = PreviewStop
+		base.IssueID = n
+		return base, true, nil
+
+	default:
+		// Interpreta como /preview #N (start) — # obrigatório.
+		n, err := parsePreviewIssueNum(args[0])
+		if err != nil {
+			return PreviewCommand{}, true, fmt.Errorf("/preview: %w", err)
+		}
+		base.Action = PreviewStart
+		base.IssueID = n
+		return base, true, nil
+	}
+}
+
+// parsePreviewIssueNum extrai o número de issue de s, exigindo o prefixo '#'.
+func parsePreviewIssueNum(s string) (int, error) {
+	if !strings.HasPrefix(s, "#") {
+		return 0, fmt.Errorf("numero de issue deve ter prefixo '#' (ex: #42), recebido %q", s)
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(s, "#"))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("numero de issue invalido: %q (ex: #42)", s)
 	}
 	return n, nil
 }

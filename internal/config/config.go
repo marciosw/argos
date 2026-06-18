@@ -47,6 +47,7 @@ type Config struct {
 	GitHub             GitHubConfig    `yaml:"github"`
 	Telegram           TelegramConfig  `yaml:"telegram"`
 	Model              ModelSection    `yaml:"model"`
+	Preview            PreviewConfig   `yaml:"preview"`
 }
 
 // WorkspaceConfig configura os checkouts locais dos repos-alvo no disco
@@ -98,6 +99,27 @@ type ModelSection struct {
 type ModelOverride struct {
 	Model string `yaml:"model"`
 }
+
+// PreviewConfig configura o subsistema de preview de aplicações (/preview).
+// Ver docs/specs/sprints/preview-v1.1/design.md §10.
+type PreviewConfig struct {
+	Enabled               bool   `yaml:"enabled"`
+	PortRangeStart        int    `yaml:"port_range_start"`
+	PortRangeEnd          int    `yaml:"port_range_end"`
+	TimeoutMinutes        int    `yaml:"timeout_minutes"`
+	StartupTimeoutSeconds int    `yaml:"startup_timeout_seconds"`
+	CloudflaredBin        string `yaml:"cloudflared_bin"`
+}
+
+// Defaults de preview.
+const (
+	DefaultPreviewEnabled               = true
+	DefaultPreviewPortRangeStart        = 9000
+	DefaultPreviewPortRangeEnd          = 9099
+	DefaultPreviewTimeoutMinutes        = 30
+	DefaultPreviewStartupTimeoutSeconds = 30
+	DefaultPreviewCloudflaredBin        = "cloudflared"
+)
 
 // Defaults embutidos (usados quando nada é configurado). Ver model_config.md §2.
 const (
@@ -191,5 +213,23 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Model.ContextThreshold == 0 {
 		c.Model.ContextThreshold = DefaultContextThreshold
+	}
+	if !c.Preview.Enabled && c.Preview.PortRangeStart == 0 {
+		c.Preview.Enabled = DefaultPreviewEnabled
+	}
+	if c.Preview.PortRangeStart == 0 {
+		c.Preview.PortRangeStart = DefaultPreviewPortRangeStart
+	}
+	if c.Preview.PortRangeEnd == 0 {
+		c.Preview.PortRangeEnd = DefaultPreviewPortRangeEnd
+	}
+	if c.Preview.TimeoutMinutes == 0 {
+		c.Preview.TimeoutMinutes = DefaultPreviewTimeoutMinutes
+	}
+	if c.Preview.StartupTimeoutSeconds == 0 {
+		c.Preview.StartupTimeoutSeconds = DefaultPreviewStartupTimeoutSeconds
+	}
+	if c.Preview.CloudflaredBin == "" {
+		c.Preview.CloudflaredBin = DefaultPreviewCloudflaredBin
 	}
 }

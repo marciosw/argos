@@ -201,9 +201,16 @@ O orquestrador é **stateful e long-running**, atendido por uma VM sempre ligada
 
 ## 13. Backlog
 
-### `/preview` — preview de aplicações via browser — prioridade v1.1 (registrado 2026-06-15)
+### `/preview` — preview de aplicações via browser — ✅ implementado em v1.1 (2026-06-17)
 
-> Média-alta prioridade. Alvo: **v1.1**, logo após a primeira versão estável.
+> **Implementado.** Sprint em [sprints/preview-v1.1/](sprints/preview-v1.1/) (design, tasks, progress, context). Pacote `internal/preview/` (PortManager, DevServer, Tunnel, PreviewManager). Comandos no `internal/telegram/gateway.go`; persistência em `migrations/0002_previews.sql` (tabela `previews`); wiring em `cmd/orchestrator/main.go`. Pendência: smoke test end-to-end na VM (cloudflared + dev server reais).
+
+**Decisões de implementação (fechadas na sprint):**
+- Tunelamento: **cloudflared modo rápido** (`cloudflared tunnel --url`), sem conta/token — URL aleatória, sem autenticação.
+- **Um preview ativo por vez** (`max_previews=1`); um novo `/preview` substitui o anterior, com notificação de substituição.
+- Timeout configurável (default **30 min**) encerra automaticamente; também encerrável por `/preview stop #N`.
+- Range de portas configurável; `web` reserva par consecutivo (Vite + uvicorn via flag `WebBackendEnabled`).
+- Recovery no startup: previews em estado transitório viram `dead` e o humano é notificado.
 
 **Descrição:** permitir que o humano visualize o resultado do trabalho do agente no browser, sem precisar fazer deploy manual ou rodar o projeto localmente.
 

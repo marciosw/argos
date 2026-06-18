@@ -88,3 +88,15 @@ model:
   # Override por issue (opcional). Chave no formato "<repo>#<numero>".
   issues:
     # "web#42": { model: "claude-opus-4-8" }
+
+# ----------------------------------------------------------------------------
+# Preview — comando /preview: sobe servidor de dev e expõe via cloudflared.
+# Ver docs/specs/sprints/preview-v1.1/design.md §10.
+# ----------------------------------------------------------------------------
+preview:
+  enabled: true
+  port_range_start: 9000   # primeira porta do pool alocado para servidores de dev
+  port_range_end: 9099     # última porta (inclusive); range de 100 portas suficiente
+  timeout_minutes: 30      # preview expira automaticamente após N minutos
+  startup_timeout_seconds: 30  # tempo máximo para o servidor de dev + tunnel ficarem prontos
+  cloudflared_bin: "cloudflared"  # path do binário (default: no PATH do systemd)

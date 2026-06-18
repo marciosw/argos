@@ -170,6 +170,42 @@ type Task struct {
 	ContextWindow int    // janela do modelo (tokens)
 }
 
+// PreviewStatus é o ciclo de vida de um preview (espelha a tabela `previews`).
+type PreviewStatus string
+
+const (
+	PreviewStarting PreviewStatus = "starting"
+	PreviewRunning  PreviewStatus = "running"
+	PreviewStopping PreviewStatus = "stopping"
+	PreviewStopped  PreviewStatus = "stopped"
+	PreviewDead     PreviewStatus = "dead"
+)
+
+// PreviewStopReason descreve por que um preview foi encerrado.
+type PreviewStopReason string
+
+const (
+	PreviewStopTimeout  PreviewStopReason = "timeout"
+	PreviewStopCommand  PreviewStopReason = "command"
+	PreviewStopReplaced PreviewStopReason = "replaced"
+	PreviewStopCrash    PreviewStopReason = "crash"
+	PreviewStopRestart  PreviewStopReason = "restart"
+)
+
+// Preview é um registro de preview de aplicação (espelha a tabela `previews`).
+type Preview struct {
+	ID         int64
+	IssueID    int64
+	Repo       string
+	Port       int
+	ExtraPort  int // porta adicional (ex.: uvicorn para repo web); 0 se não usada
+	TunnelURL  string
+	Status     PreviewStatus
+	StartedAt  time.Time
+	StoppedAt  time.Time // zero enquanto ativo
+	StopReason PreviewStopReason
+}
+
 // AuditEntry é uma linha do log de auditoria (espelha a tabela `audit_log`).
 type AuditEntry struct {
 	ID        int64

@@ -349,6 +349,225 @@ func TestWebhookDuplicateUpdateID(t *testing.T) {
 	}
 }
 
+// ======================= parsePreviewCommand =======================
+
+func TestParsePreviewStart(t *testing.T) {
+	cmd, isPreview, err := parsePreviewCommand("/preview #42", 100)
+	if !isPreview || err != nil {
+		t.Fatalf("isPreview=%v err=%v", isPreview, err)
+	}
+	if cmd.Action != PreviewStart || cmd.IssueID != 42 || cmd.ChatID != 100 {
+		t.Fatalf("got %+v", cmd)
+	}
+}
+
+func TestParsePreviewStop(t *testing.T) {
+	cmd, isPreview, err := parsePreviewCommand("/preview stop #7", 100)
+	if !isPreview || err != nil {
+		t.Fatalf("isPreview=%v err=%v", isPreview, err)
+	}
+	if cmd.Action != PreviewStop || cmd.IssueID != 7 || cmd.ChatID != 100 {
+		t.Fatalf("got %+v", cmd)
+	}
+}
+
+func TestParsePreviewStatus(t *testing.T) {
+	cmd, isPreview, err := parsePreviewCommand("/preview status", 100)
+	if !isPreview || err != nil {
+		t.Fatalf("isPreview=%v err=%v", isPreview, err)
+	}
+	if cmd.Action != PreviewStatus {
+		t.Fatalf("got %+v", cmd)
+	}
+}
+
+func TestParsePreviewStartNoHash(t *testing.T) {
+	_, isPreview, err := parsePreviewCommand("/preview 42", 100)
+	if !isPreview {
+		t.Fatal("deveria ser reconhecido como /preview")
+	}
+	if err == nil {
+		t.Fatal("esperado erro para numero de issue sem '#'")
+	}
+	if !strings.Contains(err.Error(), "#") {
+		t.Fatalf("mensagem de erro inesperada: %v", err)
+	}
+}
+
+func TestParsePreviewInvalidNumber(t *testing.T) {
+	_, isPreview, err := parsePreviewCommand("/preview #abc", 100)
+	if !isPreview || err == nil {
+		t.Fatalf("esperado erro para numero invalido: isPreview=%v err=%v", isPreview, err)
+	}
+}
+
+func TestParsePreviewStopMissingNumber(t *testing.T) {
+	_, isPreview, err := parsePreviewCommand("/preview stop", 100)
+	if !isPreview || err == nil {
+		t.Fatalf("esperado erro: isPreview=%v err=%v", isPreview, err)
+	}
+}
+
+func TestParsePreviewNotPreview(t *testing.T) {
+	_, isPreview, err := parsePreviewCommand("/approve #42", 100)
+	if isPreview || err != nil {
+		t.Fatalf("nao deveria ser preview: isPreview=%v err=%v", isPreview, err)
+	}
+}
+
+func TestParsePreviewBotSuffix(t *testing.T) {
+	cmd, isPreview, err := parsePreviewCommand("/preview@argos_bot #10", 100)
+	if !isPreview || err != nil {
+		t.Fatalf("isPreview=%v err=%v", isPreview, err)
+	}
+	if cmd.Action != PreviewStart || cmd.IssueID != 10 {
+		t.Fatalf("got %+v", cmd)
+	}
+}
+
+func TestParsePreviewNoAction(t *testing.T) {
+	_, isPreview, err := parsePreviewCommand("/preview", 100)
+	if !isPreview || err == nil {
+		t.Fatalf("esperado erro por falta de acao: isPreview=%v err=%v", isPreview, err)
+	}
+}
+
+// ======================= NotifyPreview* =======================
+
+func TestNotifyPreviewReady(t *testing.T) {
+	var gotText string
+	gw, _ := newTestGateway(t, make(chan domain.Command, 1),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			if text, ok := body["text"].(string); ok {
+				gotText = text
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	ctx := context.Background()
+	issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 42, "t", "", domain.PhaseDoing)
+
+	if err := gw.NotifyPreviewReady(ctx, issueID, "https://abc.trycloudflare.com", 30); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotText, "#42") || !strings.Contains(gotText, "abc.trycloudflare.com") || !strings.Contains(gotText, "30") {
+		t.Errorf("mensagem inesperada: %q", gotText)
+	}
+}
+
+func TestNotifyPreviewStopped(t *testing.T) {
+	cases := []struct {
+		reason domain.PreviewStopReason
+		want   string
+	}{
+		{domain.PreviewStopTimeout, "⏱️"},
+		{domain.PreviewStopCommand, "🛑"},
+		{domain.PreviewStopCrash, "💥"},
+		{domain.PreviewStopRestart, "⚠️"},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.reason), func(t *testing.T) {
+			var gotText string
+			gw, _ := newTestGateway(t, make(chan domain.Command, 1),
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]any
+					json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+					if text, ok := body["text"].(string); ok {
+						gotText = text
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+
+			ctx := context.Background()
+			issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 5, "t", "", domain.PhaseDoing)
+
+			if err := gw.NotifyPreviewStopped(ctx, issueID, tc.reason); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(gotText, "#5") {
+				t.Errorf("mensagem nao contem '#5': %q", gotText)
+			}
+			if !strings.Contains(gotText, tc.want) {
+				t.Errorf("mensagem nao contem %q: %q", tc.want, gotText)
+			}
+		})
+	}
+}
+
+func TestNotifyPreviewReplaced(t *testing.T) {
+	var gotText string
+	gw, _ := newTestGateway(t, make(chan domain.Command, 1),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			if text, ok := body["text"].(string); ok {
+				gotText = text
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	ctx := context.Background()
+	oldID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 3, "old", "", domain.PhaseDoing)
+	newID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 7, "new", "", domain.PhaseDoing)
+
+	if err := gw.NotifyPreviewReplaced(ctx, oldID, newID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotText, "#3") || !strings.Contains(gotText, "#7") {
+		t.Errorf("mensagem inesperada: %q", gotText)
+	}
+}
+
+func TestWebhookPreviewNoManager(t *testing.T) {
+	cmds := make(chan domain.Command, 1)
+	var gotText string
+	gw, _ := newTestGateway(t, cmds,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			if text, ok := body["text"].(string); ok {
+				gotText = text
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	// previewMgr não configurado — deve responder com mensagem de indisponível.
+	rr := postWebhook(t, gw, "mysecret", makeUpdate(55, 999, "/preview #1"))
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d", rr.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !strings.Contains(gotText, "disponivel") {
+		t.Errorf("mensagem esperada sobre indisponibilidade, veio: %q", gotText)
+	}
+}
+
+func TestWebhookPreviewInvalidSyntax(t *testing.T) {
+	cmds := make(chan domain.Command, 1)
+	var gotText string
+	gw, _ := newTestGateway(t, cmds,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+			if text, ok := body["text"].(string); ok {
+				gotText = text
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+
+	rr := postWebhook(t, gw, "mysecret", makeUpdate(56, 999, "/preview 42"))
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d", rr.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !strings.Contains(gotText, "#") {
+		t.Errorf("esperado erro sobre '#': %q", gotText)
+	}
+}
+
 func TestWebhookValidCommandSentToChannel(t *testing.T) {
 	cmds := make(chan domain.Command, 1)
 	gw, _ := newTestGateway(t, cmds, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

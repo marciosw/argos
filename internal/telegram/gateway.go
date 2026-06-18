@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/marciomacedo/argos/internal/config"
 	"github.com/marciomacedo/argos/internal/domain"
+	"github.com/marciomacedo/argos/internal/preview"
 	"github.com/marciomacedo/argos/internal/store"
 )
 
@@ -107,15 +109,29 @@ type Gateway interface {
 	NotifyAll(ctx context.Context, msg string) error
 	NotifyPR(ctx context.Context, repo string, issueNum int, prURL string) error
 	NotifyError(ctx context.Context, repo string, issueNum int, phase string, taskErr error) error
+	// Métodos da interface preview.Notifier (implementados pelo gateway concreto).
+	NotifyPreviewReady(ctx context.Context, issueID int64, url string, expiresMin int) error
+	NotifyPreviewStopped(ctx context.Context, issueID int64, reason domain.PreviewStopReason) error
+	NotifyPreviewReplaced(ctx context.Context, oldIssueID, newIssueID int64) error
+	NotifyPreviewError(ctx context.Context, issueID int64, err error) error
 }
 
 type gateway struct {
-	cfg         *config.TelegramConfig
-	store       *store.Store
-	cmds        chan<- domain.Command
-	tg          *tgClient
-	srv         *http.Server
-	secretToken string
+	cfg             *config.TelegramConfig
+	store           *store.Store
+	cmds            chan<- domain.Command
+	tg              *tgClient
+	srv             *http.Server
+	secretToken     string
+	previewMgr      *preview.PreviewManager
+	workspaceBaseDir string
+}
+
+// RegisterPreviewManager injeta o PreviewManager e o diretório-base dos checkouts.
+// Deve ser chamado antes de Start (no wiring do main.go).
+func (g *gateway) RegisterPreviewManager(mgr *preview.PreviewManager, workspaceBaseDir string) {
+	g.previewMgr = mgr
+	g.workspaceBaseDir = workspaceBaseDir
 }
 
 // New cria e valida o gateway. Retorna erro se qualquer token obrigatório
@@ -255,6 +271,21 @@ func (g *gateway) webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 		slog.Info("telegram: update recebido", "chat_id", chatID, "update_id", update.UpdateID)
 
+		// /preview é interceptado antes do parseCommand padrão.
+		if previewCmd, isPreview, parseErr := parsePreviewCommand(text, chatID); isPreview {
+			if parseErr != nil {
+				slog.Warn("telegram: /preview invalido", "chat_id", chatID, "err", parseErr)
+				_ = g.tg.sendMessage(bgCtx, chatID, parseErr.Error(), "HTML")
+				return
+			}
+			if g.previewMgr == nil {
+				_ = g.tg.sendMessage(bgCtx, chatID, "Preview nao esta disponivel neste momento.", "HTML")
+				return
+			}
+			g.dispatchPreview(bgCtx, chatID, previewCmd)
+			return
+		}
+
 		cmd, err := parseCommand(text, chatID)
 		if err != nil {
 			slog.Warn("telegram: comando invalido", "chat_id", chatID, "text", text, "err", err)
@@ -356,5 +387,154 @@ func (g *gateway) NotifyPR(ctx context.Context, repo string, issueNum int, prURL
 
 func (g *gateway) NotifyError(ctx context.Context, repo string, issueNum int, phase string, taskErr error) error {
 	msg := fmt.Sprintf("Issue #%d (%s): falhou na fase %s — %s", issueNum, repo, phase, taskErr.Error())
+	return g.NotifyAll(ctx, msg)
+}
+
+// ========================= preview handlers ==========================
+
+// dispatchPreview roteia um PreviewCommand para o handler correspondente.
+func (g *gateway) dispatchPreview(ctx context.Context, chatID int64, cmd PreviewCommand) {
+	switch cmd.Action {
+	case PreviewStart:
+		g.handlePreviewStart(ctx, cmd)
+	case PreviewStop:
+		g.handlePreviewStop(ctx, cmd)
+	case PreviewStatus:
+		g.handlePreviewStatus(ctx, chatID)
+	}
+}
+
+func (g *gateway) handlePreviewStart(ctx context.Context, cmd PreviewCommand) {
+	chatID := cmd.ChatID
+
+	issue, err := g.findIssueByNumber(ctx, cmd.IssueID)
+	if err != nil {
+		_ = g.tg.sendMessage(ctx, chatID,
+			fmt.Sprintf("❌ Issue #%d nao encontrada em nenhum repositorio.", cmd.IssueID), "HTML")
+		return
+	}
+
+	if issue.Phase != domain.PhaseDoing && issue.Phase != domain.PhaseDone {
+		_ = g.tg.sendMessage(ctx, chatID,
+			fmt.Sprintf("❌ Preview so disponivel para issues em <i>doing</i> ou <i>done</i>. Issue #%d esta em <i>%s</i>.",
+				cmd.IssueID, issue.Phase), "HTML")
+		return
+	}
+
+	_ = g.tg.sendMessage(ctx, chatID,
+		fmt.Sprintf("⏳ Subindo preview da issue #%d (<code>%s</code>)...", cmd.IssueID, issue.Repo), "HTML")
+
+	checkoutDir := filepath.Join(g.workspaceBaseDir, issue.Repo)
+	if err := g.previewMgr.Start(ctx, issue.ID, issue.Repo, checkoutDir); err != nil {
+		slog.Error("telegram: /preview start falhou", "issue", cmd.IssueID, "err", err)
+		_ = g.tg.sendMessage(ctx, chatID,
+			fmt.Sprintf("❌ Falha ao iniciar preview da issue #%d: <code>%s</code>", cmd.IssueID, err.Error()), "HTML")
+	}
+	// Sucesso: PreviewManager chama NotifyPreviewReady via Notifier.
+}
+
+func (g *gateway) handlePreviewStop(ctx context.Context, cmd PreviewCommand) {
+	chatID := cmd.ChatID
+
+	issue, err := g.findIssueByNumber(ctx, cmd.IssueID)
+	if err != nil {
+		_ = g.tg.sendMessage(ctx, chatID,
+			fmt.Sprintf("❌ Issue #%d nao encontrada.", cmd.IssueID), "HTML")
+		return
+	}
+
+	if err := g.previewMgr.Stop(issue.ID, domain.PreviewStopCommand); err != nil {
+		_ = g.tg.sendMessage(ctx, chatID,
+			fmt.Sprintf("❌ %s", err.Error()), "HTML")
+		return
+	}
+	_ = g.NotifyPreviewStopped(ctx, issue.ID, domain.PreviewStopCommand)
+}
+
+func (g *gateway) handlePreviewStatus(ctx context.Context, chatID int64) {
+	infos, err := g.previewMgr.StatusAll(ctx)
+	if err != nil {
+		_ = g.tg.sendMessage(ctx, chatID,
+			"❌ Erro ao obter status dos previews: "+err.Error(), "HTML")
+		return
+	}
+
+	if len(infos) == 0 {
+		_ = g.tg.sendMessage(ctx, chatID, "Nenhum preview ativo.", "HTML")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<b>Previews ativos:</b>\n\n")
+	for _, p := range infos {
+		issueNum := 0
+		if iss, err := g.store.GetIssueByID(ctx, p.IssueID); err == nil {
+			issueNum = iss.Number
+		}
+		mins := int(p.TimeLeft.Minutes())
+		sb.WriteString(fmt.Sprintf("Issue #%d (<code>%s</code>)\nURL: %s\nExpira em: %d min\n",
+			issueNum, p.Repo, p.TunnelURL, mins))
+	}
+	_ = g.tg.sendMessage(ctx, chatID, sb.String(), "HTML")
+}
+
+// findIssueByNumber procura a issue pelo número do GitHub em todos os repos.
+func (g *gateway) findIssueByNumber(ctx context.Context, number int) (domain.Issue, error) {
+	for _, repo := range domain.Repos {
+		issue, err := g.store.GetIssue(ctx, repo, number)
+		if err == nil {
+			return issue, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return domain.Issue{}, fmt.Errorf("telegram: buscar issue #%d em %s: %w", number, repo, err)
+		}
+	}
+	return domain.Issue{}, fmt.Errorf("telegram: issue #%d nao encontrada em nenhum repositorio", number)
+}
+
+// ====================== preview.Notifier impl =======================
+
+func (g *gateway) NotifyPreviewReady(ctx context.Context, issueID int64, url string, expiresMin int) error {
+	issue, err := g.store.GetIssueByID(ctx, issueID)
+	if err != nil {
+		slog.Error("telegram: NotifyPreviewReady: GetIssueByID", "issue_id", issueID, "err", err)
+		return err
+	}
+	msg := fmt.Sprintf("✅ Preview da issue #%d: <code>%s</code>\nExpira em %d min",
+		issue.Number, url, expiresMin)
+	return g.NotifyAll(ctx, msg)
+}
+
+func (g *gateway) NotifyPreviewStopped(ctx context.Context, issueID int64, reason domain.PreviewStopReason) error {
+	issue, _ := g.store.GetIssueByID(ctx, issueID)
+
+	var msg string
+	switch reason {
+	case domain.PreviewStopTimeout:
+		msg = fmt.Sprintf("⏱️ Preview da issue #%d expirou (timeout)", issue.Number)
+	case domain.PreviewStopCommand:
+		msg = fmt.Sprintf("🛑 Preview da issue #%d encerrado", issue.Number)
+	case domain.PreviewStopCrash:
+		msg = fmt.Sprintf("💥 Preview da issue #%d caiu inesperadamente", issue.Number)
+	case domain.PreviewStopRestart:
+		msg = fmt.Sprintf("⚠️ Preview da issue #%d marcado como morto (Argos reiniciou)", issue.Number)
+	default:
+		msg = fmt.Sprintf("🛑 Preview da issue #%d encerrado (%s)", issue.Number, reason)
+	}
+	return g.NotifyAll(ctx, msg)
+}
+
+func (g *gateway) NotifyPreviewReplaced(ctx context.Context, oldIssueID, newIssueID int64) error {
+	oldIssue, _ := g.store.GetIssueByID(ctx, oldIssueID)
+	newIssue, _ := g.store.GetIssueByID(ctx, newIssueID)
+	msg := fmt.Sprintf("⚠️ Preview anterior da issue #%d encerrado para abrir #%d",
+		oldIssue.Number, newIssue.Number)
+	return g.NotifyAll(ctx, msg)
+}
+
+func (g *gateway) NotifyPreviewError(ctx context.Context, issueID int64, previewErr error) error {
+	issue, _ := g.store.GetIssueByID(ctx, issueID)
+	msg := fmt.Sprintf("❌ Falha ao iniciar preview da issue #%d: <code>%s</code>",
+		issue.Number, previewErr.Error())
 	return g.NotifyAll(ctx, msg)
 }

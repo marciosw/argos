@@ -57,6 +57,17 @@ agent:ready → documentation → todo → doing → done
 | `/resume repo`      | Retoma o repo. |
 | `/status`           | Status de todos os repos e issues em andamento. |
 | `/run #N`           | Força o processamento imediato da issue N. |
+| `/preview #N`       | Sobe o servidor de dev do repo da issue N + túnel cloudflared e retorna URL HTTPS temporária (substitui o preview anterior). |
+| `/preview stop #N`  | Derruba o servidor de dev e o túnel da issue N. |
+| `/preview status`   | Lista o preview ativo (URL e tempo restante). |
+
+## Dependências externas na VM
+
+Precisam estar no `PATH` do processo Argos (configurar `Environment=` no unit systemd):
+
+- **`cloudflared`** — túnel das URLs de preview (modo rápido, sem conta).
+- **`node`/`npm`** — `npm run dev` (Vite) para o repo `web`.
+- **`flutter`** — `flutter run -d web-server` para `mobile`/`hybrid`.
 
 ## Convenções
 
@@ -108,17 +119,9 @@ Pontos em aberto (ver `docs/specs/design.md` §12):
 
 ## Backlog
 
-### `/preview` — preview de aplicações via browser — prioridade v1.1 (registrado 2026-06-15)
+### `/preview` — preview de aplicações via browser — ✅ implementado em v1.1 (2026-06-17)
 
-Média-alta prioridade, alvo **v1.1** (logo após a primeira versão estável). Permite ao humano visualizar o resultado do trabalho do agente no browser/celular, sem deploy manual nem ambiente local.
-
-- `/preview #N` — sobe o servidor de dev do repo da issue N e retorna URL temporária.
-- `/preview stop #N` — derruba o preview da issue N.
-- `/preview status` — lista previews ativos.
-
-Servidor de dev por tipo de repo: `web` → `uvicorn` + `npm run dev`; `mobile`/`hybrid` → `flutter run -d web-server --web-port <porta>` (Flutter Web como aproximação). Exposição via tunelamento (ngrok/cloudflared/porta na VM — decisão de implementação, desacoplada do comando). Preview temporário: timeout configurável (sugestão 30 min) ou comando explícito. Nomeado `/preview` (não `/ngrok`) para desacoplar a interface da ferramenta.
-
-Pontos a decidir na implementação: gestão de portas na VM, limpeza de processos órfãos, autenticação da URL exposta (ngrok free não suporta senha), e a ressalva de que Flutter Web não substitui teste em device físico. Detalhes em `docs/specs/design.md` §13.
+**Implementado.** Comandos `/preview #N`, `/preview stop #N`, `/preview status` (ver tabela de comandos acima). Pacote `internal/preview/` (PortManager, DevServer, Tunnel, PreviewManager); tabela `previews` (`migrations/0002_previews.sql`); wiring em `cmd/orchestrator/main.go` (sob `cfg.Preview.Enabled`). Tunelamento via **cloudflared modo rápido** (URL aleatória, sem autenticação); **1 preview ativo por vez** (substitui o anterior); timeout default **30 min**; recovery no startup (transitórios → `dead` + notificação). Sprint em `docs/specs/sprints/preview-v1.1/`. Pendência: smoke test end-to-end na VM.
 
 ### Conversa livre com o agente via Telegram (texto + imagens) — prioridade v1.2 (registrado 2026-06-15)
 

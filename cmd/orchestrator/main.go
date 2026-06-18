@@ -19,6 +19,7 @@ import (
 	"github.com/marciomacedo/argos/internal/config"
 	"github.com/marciomacedo/argos/internal/domain"
 	"github.com/marciomacedo/argos/internal/github"
+	"github.com/marciomacedo/argos/internal/preview"
 	"github.com/marciomacedo/argos/internal/runner"
 	"github.com/marciomacedo/argos/internal/scheduler"
 	"github.com/marciomacedo/argos/internal/store"
@@ -77,6 +78,22 @@ func main() {
 	if err != nil {
 		slog.Error("telegram: falha ao criar gateway", "err", err)
 		os.Exit(1)
+	}
+
+	// Subsistema de preview (/preview). O gateway é construído antes para ser
+	// injetado como preview.Notifier; em seguida o previewMgr é registrado de
+	// volta no gateway (resolve a dependência circular). Ver design.md §12.
+	if cfg.Preview.Enabled {
+		portMgr := preview.NewPortManager(cfg.Preview)
+		devCfg := preview.DefaultDevServerConfig()
+		previewMgr := preview.NewPreviewManager(st, portMgr, gw, cfg.Preview, devCfg)
+		if err := previewMgr.RecoverStale(ctx); err != nil {
+			slog.Error("preview: RecoverStale falhou", "err", err) // não fatal
+		}
+		gw.RegisterPreviewManager(previewMgr, cfg.Workspace.BaseDir)
+		slog.Info("preview: subsistema habilitado",
+			"port_range", []int{cfg.Preview.PortRangeStart, cfg.Preview.PortRangeEnd},
+			"timeout_min", cfg.Preview.TimeoutMinutes)
 	}
 
 	ws := workspace.New(workspace.Options{

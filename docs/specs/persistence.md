@@ -145,6 +145,29 @@ CREATE TABLE audit_log (
 );
 ```
 
+### `previews`
+Ciclo de vida de cada preview de aplicação (`/preview`, sprint v1.1): processo de dev + túnel cloudflared. Um preview ativo por vez (`max_previews=1`); um novo substitui o anterior. Migration `0002_previews.sql`. Ver [sprints/preview-v1.1/design.md](sprints/preview-v1.1/design.md) §8.
+
+```sql
+CREATE TABLE previews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id    INTEGER NOT NULL REFERENCES issues(id),
+    repo        TEXT NOT NULL,
+    port        INTEGER NOT NULL,
+    extra_port  INTEGER,              -- porta adicional (ex.: uvicorn p/ repo web)
+    tunnel_url  TEXT,                 -- URL HTTPS do cloudflared (preenchida após start)
+    status      TEXT NOT NULL,        -- starting | running | stopping | stopped | dead
+    started_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    stopped_at  TIMESTAMP,
+    stop_reason TEXT                  -- timeout | command | replaced | crash | restart
+);
+
+CREATE INDEX idx_previews_issue ON previews (issue_id);
+CREATE INDEX idx_previews_status ON previews (status);
+```
+
+> No startup, previews em estado transitório (`starting`/`running`/`stopping`) são marcados como `dead` (recovery — sem processo sobreviveu ao restart) e o humano é notificado via Telegram.
+
 ## 4. Queries principais
 
 | Operação | Descrição |

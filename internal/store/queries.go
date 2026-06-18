@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/marciomacedo/argos/internal/domain"
@@ -611,6 +612,153 @@ func nullStr(s string) any {
 }
 
 func nullInt64(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+// ============================= previews ==============================
+
+// CreatePreview insere um novo preview com status 'starting' e retorna o id.
+func (s *Store) CreatePreview(ctx context.Context, issueID int64, repo string, port, extraPort int) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO previews (issue_id, repo, port, extra_port, status)
+		 VALUES (?, ?, ?, ?, ?)`,
+		issueID, repo, port, nullInt(extraPort), string(domain.PreviewStarting))
+	if err != nil {
+		return 0, fmt.Errorf("store: create preview issue=%d: %w", issueID, err)
+	}
+	return res.LastInsertId()
+}
+
+// SetPreviewRunning marca o preview como 'running' e grava a URL do túnel.
+func (s *Store) SetPreviewRunning(ctx context.Context, id int64, tunnelURL string) error {
+	return s.execAffect(ctx,
+		`UPDATE previews SET status = ?, tunnel_url = ? WHERE id = ?`,
+		string(domain.PreviewRunning), tunnelURL, id)
+}
+
+// StopPreview encerra um preview, gravando o status final e o motivo.
+func (s *Store) StopPreview(ctx context.Context, id int64, status domain.PreviewStatus, reason domain.PreviewStopReason) error {
+	return s.execAffect(ctx,
+		`UPDATE previews SET status = ?, stop_reason = ?, stopped_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`,
+		string(status), string(reason), id)
+}
+
+// GetActivePreview retorna o preview ativo (starting|running|stopping), se
+// houver. Retorna ErrNotFound quando não há nenhum ativo.
+func (s *Store) GetActivePreview(ctx context.Context) (domain.Preview, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, issue_id, repo, port, extra_port, tunnel_url, status,
+		        started_at, stopped_at, stop_reason
+		 FROM previews
+		 WHERE status IN ('starting','running','stopping')
+		 ORDER BY id DESC LIMIT 1`)
+	return scanPreview(row)
+}
+
+// GetPreviewByIssue retorna o preview mais recente de uma issue (qualquer
+// status). Retorna ErrNotFound se a issue nunca teve preview.
+func (s *Store) GetPreviewByIssue(ctx context.Context, issueID int64) (domain.Preview, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, issue_id, repo, port, extra_port, tunnel_url, status,
+		        started_at, stopped_at, stop_reason
+		 FROM previews WHERE issue_id = ? ORDER BY id DESC LIMIT 1`,
+		issueID)
+	return scanPreview(row)
+}
+
+// MarkStalePreviewsDead marca como 'dead' todos os previews que ficaram em
+// estado transitório (starting|running|stopping) — chamado no startup para
+// recuperação após restart do Argos. Retorna os ids marcados.
+func (s *Store) MarkStalePreviewsDead(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE previews
+		 SET status = ?, stop_reason = ?, stopped_at = CURRENT_TIMESTAMP
+		 WHERE status IN ('starting','running','stopping')
+		 RETURNING id`,
+		string(domain.PreviewDead), string(domain.PreviewStopRestart))
+	if err != nil {
+		return nil, fmt.Errorf("store: mark stale previews dead: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return ids, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListPreviews retorna previews filtrados por status. Se statusFilter estiver
+// vazio, retorna todos. Ordenados do mais recente para o mais antigo.
+func (s *Store) ListPreviews(ctx context.Context, statusFilter []domain.PreviewStatus) ([]domain.Preview, error) {
+	var (
+		query string
+		args  []any
+	)
+	if len(statusFilter) == 0 {
+		query = `SELECT id, issue_id, repo, port, extra_port, tunnel_url, status,
+		                started_at, stopped_at, stop_reason
+		         FROM previews ORDER BY id DESC`
+	} else {
+		placeholders := make([]string, len(statusFilter))
+		for i, st := range statusFilter {
+			placeholders[i] = "?"
+			args = append(args, string(st))
+		}
+		query = `SELECT id, issue_id, repo, port, extra_port, tunnel_url, status,
+		                started_at, stopped_at, stop_reason
+		         FROM previews WHERE status IN (` + strings.Join(placeholders, ",") + `)
+		         ORDER BY id DESC`
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list previews: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Preview
+	for rows.Next() {
+		p, err := scanPreview(rows)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func scanPreview(r rowScanner) (domain.Preview, error) {
+	var (
+		p                             domain.Preview
+		extraPort                     sql.NullInt64
+		tunnelURL, stopReason         sql.NullString
+		status                        string
+		startedAt, stoppedAt          sql.NullString
+	)
+	err := r.Scan(&p.ID, &p.IssueID, &p.Repo, &p.Port, &extraPort,
+		&tunnelURL, &status, &startedAt, &stoppedAt, &stopReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Preview{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Preview{}, err
+	}
+	p.ExtraPort = int(extraPort.Int64)
+	p.TunnelURL = tunnelURL.String
+	p.Status = domain.PreviewStatus(status)
+	p.StopReason = domain.PreviewStopReason(stopReason.String)
+	p.StartedAt = parseTS(startedAt)
+	p.StoppedAt = parseTS(stoppedAt)
+	return p, nil
+}
+
+func nullInt(v int) any {
 	if v == 0 {
 		return nil
 	}
