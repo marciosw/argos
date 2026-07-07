@@ -193,11 +193,11 @@ func parsePreviewIssueNum(s string) (int, error) {
 // parseRepo valida que args[0] é um repositório reconhecido.
 func parseRepo(args []string) (string, error) {
 	if len(args) == 0 {
-		return "", fmt.Errorf("repositorio e obrigatorio (web, mobile ou hybrid)")
+		return "", fmt.Errorf("repositorio e obrigatorio (redeagenda)")
 	}
 	repo := strings.ToLower(args[0])
 	if !domain.IsValidRepo(repo) {
-		return "", fmt.Errorf("repositorio invalido %q — use: web, mobile ou hybrid", args[0])
+		return "", fmt.Errorf("repositorio invalido %q — use: redeagenda", args[0])
 	}
 	return repo, nil
 }

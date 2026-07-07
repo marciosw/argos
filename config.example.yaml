@@ -46,9 +46,7 @@ github:
   api_base: "https://api.github.com"
   token_env: "GITHUB_TOKEN" # nome da env var com o PAT (nunca o token em si)
   repos:
-    web:    { owner: "minha-org", name: "repo-web" }
-    mobile: { owner: "minha-org", name: "repo-mobile" }
-    hybrid: { owner: "minha-org", name: "repo-hybrid" }
+    redeagenda: { owner: "marciosw", name: "redeagenda" }
 
 # ----------------------------------------------------------------------------
 # Telegram — webhook (não long polling). Tokens via env. Ver telegram_gateway.md.
@@ -81,9 +79,7 @@ model:
 
   # Override por repositório (opcional).
   repos:
-    web:    { model: "claude-opus-4-5" }
-    mobile: { model: "claude-opus-4-5" }
-    hybrid: { model: "claude-opus-4-5" }
+    redeagenda: { model: "claude-opus-4-5" }
 
   # Override por issue (opcional). Chave no formato "<repo>#<numero>".
   issues:

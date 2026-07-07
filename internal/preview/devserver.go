@@ -32,40 +32,27 @@ func NewDevServer(cfg config.PreviewConfig, devCfg DevServerConfig) *DevServer {
 func (ds *DevServer) Start(ctx context.Context, repo, checkoutDir string, port, extraPort int) error {
 	log := slog.With("repo", repo, "port", port)
 	switch repo {
-	case domain.RepoWeb:
-		return ds.startWeb(ctx, checkoutDir, port, extraPort, log)
-	case domain.RepoMobile, domain.RepoHybrid:
-		return ds.startFlutter(ctx, checkoutDir, port, log)
+	case domain.RepoRedeAgenda:
+		return ds.startRedeAgenda(ctx, checkoutDir, port, extraPort, log)
 	default:
 		return fmt.Errorf("devserver: repo desconhecido: %q", repo)
 	}
 }
 
-func (ds *DevServer) startWeb(ctx context.Context, dir string, port, extraPort int, log *slog.Logger) error {
-	if ds.devCfg.WebBackendEnabled && extraPort != 0 {
-		log.Info("iniciando uvicorn", "extra_port", extraPort, "app", ds.devCfg.UvicornApp)
-		if err := ds.launch(ctx, dir, "web-backend", []string{
-			"uvicorn", ds.devCfg.UvicornApp,
-			"--host", "0.0.0.0",
+// startRedeAgenda sobe o servidor de preview do redeagenda: flutter web-server
+// no port principal e, opcionalmente, o backend Go no extraPort.
+func (ds *DevServer) startRedeAgenda(ctx context.Context, dir string, port, extraPort int, log *slog.Logger) error {
+	if ds.devCfg.GoBackendEnabled && extraPort != 0 {
+		log.Info("iniciando backend Go", "extra_port", extraPort, "cmd", ds.devCfg.GoBackendCmd)
+		if err := ds.launch(ctx, dir, "go-backend", []string{
+			ds.devCfg.GoBackendCmd,
 			"--port", fmt.Sprint(extraPort),
 		}, log); err != nil {
-			return fmt.Errorf("devserver: uvicorn: %w", err)
+			return fmt.Errorf("devserver: go backend: %w", err)
 		}
 	}
-	log.Info("iniciando npm run dev", "port", port)
-	if err := ds.launch(ctx, dir, "web-frontend", []string{
-		"npm", "run", "dev", "--",
-		"--port", fmt.Sprint(port),
-		"--host", "0.0.0.0",
-	}, log); err != nil {
-		return fmt.Errorf("devserver: npm run dev: %w", err)
-	}
-	return ds.waitReady(ctx, port, log)
-}
-
-func (ds *DevServer) startFlutter(ctx context.Context, dir string, port int, log *slog.Logger) error {
 	log.Info("iniciando flutter web-server", "port", port)
-	if err := ds.launch(ctx, dir, "flutter", []string{
+	if err := ds.launch(ctx, dir, "flutter-frontend", []string{
 		"flutter", "run",
 		"-d", "web-server",
 		"--web-port", fmt.Sprint(port),

@@ -17,7 +17,9 @@
       "Bash(rm -f .git/index.lock)",
       "Bash(git -c commit.gpgsign=false commit -q -F -)",
       "Bash(git -C /Users/marciomacedo/dev/github/argos add internal/github/ docs/specs/issue-1/progress.md)",
-      "Bash(git -c commit.gpgsign=false -C /Users/marciomacedo/dev/github/argos commit -m ' *)"
+      "Bash(git -c commit.gpgsign=false -C /Users/marciomacedo/dev/github/argos commit -m ' *)",
+      "Bash(chmod +x /Users/marciomacedo/dev/github/argos/deploy/setup.sh)",
+      "Bash(bash -n /Users/marciomacedo/dev/github/argos/deploy/setup.sh)"
     ],
     "additionalDirectories": [
       "/Users/marciomacedo/dev/github/argos/cmd"

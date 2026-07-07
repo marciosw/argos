@@ -71,11 +71,11 @@ func TestParseCommandRejectMissingReason(t *testing.T) {
 }
 
 func TestParseCommandPauseValid(t *testing.T) {
-	cmd, err := parseCommand("/pause web", 100)
+	cmd, err := parseCommand("/pause redeagenda", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Type != domain.CmdPause || cmd.Repo != "web" {
+	if cmd.Type != domain.CmdPause || cmd.Repo != "redeagenda" {
 		t.Fatalf("got %+v", cmd)
 	}
 }
@@ -114,7 +114,7 @@ func TestParseCommandUnknown(t *testing.T) {
 
 func TestFormatDigest(t *testing.T) {
 	d := DigestData{
-		IssueRepo:  "web",
+		IssueRepo:  "redeagenda",
 		IssueNum:   42,
 		IssueTitle: "Titulo da issue",
 		Objectives: "Objetivo principal",
@@ -124,7 +124,7 @@ func TestFormatDigest(t *testing.T) {
 	}
 	out := FormatDigest(d)
 	checks := []string{
-		"#42", "web", "Titulo da issue",
+		"#42", "redeagenda", "Titulo da issue",
 		"Objetivo principal", "internal/foo",
 		"Decisao A", "Risco de migracao",
 		"/approve #42", "/reject #42",
@@ -447,7 +447,7 @@ func TestNotifyPreviewReady(t *testing.T) {
 		}))
 
 	ctx := context.Background()
-	issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 42, "t", "", domain.PhaseDoing)
+	issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoRedeAgenda, 42, "t", "", domain.PhaseDoing)
 
 	if err := gw.NotifyPreviewReady(ctx, issueID, "https://abc.trycloudflare.com", 30); err != nil {
 		t.Fatal(err)
@@ -482,7 +482,7 @@ func TestNotifyPreviewStopped(t *testing.T) {
 				}))
 
 			ctx := context.Background()
-			issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 5, "t", "", domain.PhaseDoing)
+			issueID, _ := gw.store.UpsertIssue(ctx, domain.RepoRedeAgenda, 5, "t", "", domain.PhaseDoing)
 
 			if err := gw.NotifyPreviewStopped(ctx, issueID, tc.reason); err != nil {
 				t.Fatal(err)
@@ -510,8 +510,8 @@ func TestNotifyPreviewReplaced(t *testing.T) {
 		}))
 
 	ctx := context.Background()
-	oldID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 3, "old", "", domain.PhaseDoing)
-	newID, _ := gw.store.UpsertIssue(ctx, domain.RepoWeb, 7, "new", "", domain.PhaseDoing)
+	oldID, _ := gw.store.UpsertIssue(ctx, domain.RepoRedeAgenda, 3, "old", "", domain.PhaseDoing)
+	newID, _ := gw.store.UpsertIssue(ctx, domain.RepoRedeAgenda, 7, "new", "", domain.PhaseDoing)
 
 	if err := gw.NotifyPreviewReplaced(ctx, oldID, newID); err != nil {
 		t.Fatal(err)

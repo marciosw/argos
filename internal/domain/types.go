@@ -8,13 +8,11 @@ import "time"
 
 // Repositórios gerenciados (ver design.md §1).
 const (
-	RepoWeb    = "web"
-	RepoMobile = "mobile"
-	RepoHybrid = "hybrid"
+	RepoRedeAgenda = "redeagenda"
 )
 
 // Repos é a lista canônica dos repositórios suportados.
-var Repos = []string{RepoWeb, RepoMobile, RepoHybrid}
+var Repos = []string{RepoRedeAgenda}
 
 // IsValidRepo informa se r é um dos repositórios suportados.
 func IsValidRepo(r string) bool {

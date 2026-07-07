@@ -32,7 +32,7 @@ func (p *PortManager) Alloc(repo string) (port, extraPort int, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	needTwo := repo == domain.RepoWeb
+	needTwo := repo == domain.RepoRedeAgenda
 
 	for i := p.start; i <= p.end; i++ {
 		if _, used := p.inUse[i]; used {
@@ -55,7 +55,7 @@ func (p *PortManager) Alloc(repo string) (port, extraPort int, err error) {
 	}
 
 	if needTwo {
-		return 0, 0, fmt.Errorf("preview: nenhum par de portas consecutivas livre em [%d, %d]", p.start, p.end)
+		return 0, 0, fmt.Errorf("preview: nenhum par de portas consecutivas livre em [%d, %d] para %s", p.start, p.end, repo)
 	}
 	return 0, 0, fmt.Errorf("preview: nenhuma porta livre em [%d, %d]", p.start, p.end)
 }

@@ -59,7 +59,7 @@ func TestOpenFileBacked(t *testing.T) {
 		t.Fatalf("journal_mode = %q, quero wal", mode)
 	}
 
-	id, err := s.UpsertIssue(ctx, domain.RepoWeb, 1, "t", "", domain.PhaseReady)
+	id, err := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 1, "t", "", domain.PhaseReady)
 	if err != nil || id == 0 {
 		t.Fatalf("UpsertIssue file: id=%d err=%v", id, err)
 	}
@@ -69,7 +69,7 @@ func TestUpsertAndGetIssue(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	id, err := s.UpsertIssue(ctx, domain.RepoWeb, 42, "Título", "https://gh/42", domain.PhaseReady)
+	id, err := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 42, "Título", "https://gh/42", domain.PhaseReady)
 	if err != nil {
 		t.Fatalf("UpsertIssue: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestUpsertAndGetIssue(t *testing.T) {
 		t.Fatal("id zero")
 	}
 
-	got, err := s.GetIssue(ctx, domain.RepoWeb, 42)
+	got, err := s.GetIssue(ctx, domain.RepoRedeAgenda, 42)
 	if err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
@@ -90,14 +90,14 @@ func TestUpsertAndGetIssue(t *testing.T) {
 
 	// Upsert idempotente: mesmo (repo, number) → mesmo id, título atualizado,
 	// fase preservada.
-	id2, err := s.UpsertIssue(ctx, domain.RepoWeb, 42, "Novo título", "https://gh/42", domain.PhaseDoing)
+	id2, err := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 42, "Novo título", "https://gh/42", domain.PhaseDoing)
 	if err != nil {
 		t.Fatalf("UpsertIssue 2: %v", err)
 	}
 	if id2 != id {
 		t.Fatalf("id mudou no upsert: %d != %d", id2, id)
 	}
-	got2, _ := s.GetIssue(ctx, domain.RepoWeb, 42)
+	got2, _ := s.GetIssue(ctx, domain.RepoRedeAgenda, 42)
 	if got2.Title != "Novo título" {
 		t.Fatalf("título não atualizado: %q", got2.Title)
 	}
@@ -108,7 +108,7 @@ func TestUpsertAndGetIssue(t *testing.T) {
 
 func TestGetIssueNotFound(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.GetIssue(context.Background(), domain.RepoMobile, 999)
+	_, err := s.GetIssue(context.Background(), "other-repo", 999)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("quero ErrNotFound, veio %v", err)
 	}
@@ -117,7 +117,7 @@ func TestGetIssueNotFound(t *testing.T) {
 func TestSetPhaseAndFields(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoWeb, 1, "t", "", domain.PhaseReady)
+	id, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 1, "t", "", domain.PhaseReady)
 
 	if err := s.SetPhase(ctx, id, domain.PhaseDoing); err != nil {
 		t.Fatalf("SetPhase: %v", err)
@@ -155,7 +155,7 @@ func TestSetPhaseAndFields(t *testing.T) {
 func TestLockLifecycle(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoWeb, 7, "t", "", domain.PhaseTodo)
+	id, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 7, "t", "", domain.PhaseTodo)
 
 	// Adquire com sucesso.
 	ok, err := s.AcquireLock(ctx, id, "worker-a", time.Minute)
@@ -185,7 +185,7 @@ func TestLockLifecycle(t *testing.T) {
 func TestLockExpiryAndReap(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoWeb, 8, "t", "", domain.PhaseTodo)
+	id, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 8, "t", "", domain.PhaseTodo)
 
 	// Lock já expirado (lease negativo).
 	ok, err := s.AcquireLock(ctx, id, "worker-a", -time.Minute)
@@ -214,7 +214,7 @@ func TestLockExpiryAndReap(t *testing.T) {
 func TestSessionLifecycle(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoMobile, 3, "t", "", domain.PhaseDoing)
+	id, _ := s.UpsertIssue(ctx, "other-repo", 3, "t", "", domain.PhaseDoing)
 
 	sid, err := s.CreateSession(ctx, SessionInput{
 		IssueID: id, Phase: domain.PhaseDoing, Model: "claude-opus-4-5",
@@ -268,7 +268,7 @@ func TestSessionLifecycle(t *testing.T) {
 func TestApprovalFlow(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoWeb, 10, "t", "", domain.PhaseDocumentation)
+	id, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 10, "t", "", domain.PhaseDocumentation)
 
 	if _, err := s.OpenApproval(ctx, id); err != nil {
 		t.Fatalf("OpenApproval: %v", err)
@@ -325,41 +325,41 @@ func TestRepoStateAndActiveRepos(t *testing.T) {
 		}
 	}
 	// EnsureRepo idempotente.
-	if err := s.EnsureRepo(ctx, domain.RepoWeb); err != nil {
+	if err := s.EnsureRepo(ctx, domain.RepoRedeAgenda); err != nil {
 		t.Fatalf("EnsureRepo idempotente: %v", err)
 	}
 
 	active, _ := s.ListActiveRepos(ctx)
-	if len(active) != 3 {
-		t.Fatalf("ativos = %v, quero 3", active)
+	if len(active) != 1 {
+		t.Fatalf("ativos = %v, quero 1", active)
 	}
 
-	// Pausar mobile.
-	if err := s.SetRepoPaused(ctx, domain.RepoMobile, true, "manutenção"); err != nil {
+	// Pausar redeagenda.
+	if err := s.SetRepoPaused(ctx, domain.RepoRedeAgenda, true, "manutenção"); err != nil {
 		t.Fatalf("SetRepoPaused: %v", err)
 	}
 	active, _ = s.ListActiveRepos(ctx)
-	if len(active) != 2 {
-		t.Fatalf("ativos pós-pausa = %v, quero 2", active)
+	if len(active) != 0 {
+		t.Fatalf("ativos pós-pausa = %v, quero 0", active)
 	}
-	rs, _ := s.GetRepoState(ctx, domain.RepoMobile)
+	rs, _ := s.GetRepoState(ctx, domain.RepoRedeAgenda)
 	if !rs.Paused || rs.PausedReason != "manutenção" {
 		t.Fatalf("repo_state inesperado: %+v", rs)
 	}
 
 	// Retomar.
-	s.SetRepoPaused(ctx, domain.RepoMobile, false, "")
+	s.SetRepoPaused(ctx, domain.RepoRedeAgenda, false, "")
 	active, _ = s.ListActiveRepos(ctx)
-	if len(active) != 3 {
-		t.Fatalf("ativos pós-resume = %v, quero 3", active)
+	if len(active) != 1 {
+		t.Fatalf("ativos pós-resume = %v, quero 1", active)
 	}
 
 	// Cursor de polling.
 	now := time.Now()
-	if err := s.UpdatePollCursor(ctx, domain.RepoWeb, now, `W/"etag"`); err != nil {
+	if err := s.UpdatePollCursor(ctx, domain.RepoRedeAgenda, now, `W/"etag"`); err != nil {
 		t.Fatalf("UpdatePollCursor: %v", err)
 	}
-	rs, _ = s.GetRepoState(ctx, domain.RepoWeb)
+	rs, _ = s.GetRepoState(ctx, domain.RepoRedeAgenda)
 	if rs.ETag != `W/"etag"` || rs.LastPolledAt.IsZero() {
 		t.Fatalf("cursor não persistido: %+v", rs)
 	}
@@ -397,16 +397,16 @@ func TestStatusSnapshot(t *testing.T) {
 	for _, r := range domain.Repos {
 		s.EnsureRepo(ctx, r)
 	}
-	s.UpsertIssue(ctx, domain.RepoWeb, 1, "a", "", domain.PhaseDoing)
-	s.UpsertIssue(ctx, domain.RepoWeb, 2, "b", "", domain.PhaseDoing)
-	s.UpsertIssue(ctx, domain.RepoMobile, 3, "c", "", domain.PhaseTodo)
+	s.UpsertIssue(ctx, domain.RepoRedeAgenda, 1, "a", "", domain.PhaseDoing)
+	s.UpsertIssue(ctx, domain.RepoRedeAgenda, 2, "b", "", domain.PhaseDoing)
+	s.UpsertIssue(ctx, "other-repo", 3, "c", "", domain.PhaseTodo)
 
 	snap, err := s.StatusSnapshot(ctx)
 	if err != nil {
 		t.Fatalf("StatusSnapshot: %v", err)
 	}
-	if len(snap.Repos) != 3 {
-		t.Fatalf("repos = %d, quero 3", len(snap.Repos))
+	if len(snap.Repos) != 1 {
+		t.Fatalf("repos = %d, quero 1", len(snap.Repos))
 	}
 	if snap.PhaseCounts[domain.PhaseDoing] != 2 || snap.PhaseCounts[domain.PhaseTodo] != 1 {
 		t.Fatalf("phase counts inesperados: %v", snap.PhaseCounts)
@@ -416,9 +416,9 @@ func TestStatusSnapshot(t *testing.T) {
 func TestAudit(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id, _ := s.UpsertIssue(ctx, domain.RepoWeb, 1, "t", "", domain.PhaseReady)
+	id, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 1, "t", "", domain.PhaseReady)
 
-	if err := s.Audit(ctx, id, domain.RepoWeb, "command", `{"cmd":"run"}`); err != nil {
+	if err := s.Audit(ctx, id, domain.RepoRedeAgenda, "command", `{"cmd":"run"}`); err != nil {
 		t.Fatalf("Audit: %v", err)
 	}
 	// Auditoria sem issue (issueID 0).
@@ -436,7 +436,7 @@ func TestAudit(t *testing.T) {
 func TestPreviewLifecycle(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	issueID, _ := s.UpsertIssue(ctx, domain.RepoWeb, 5, "preview test", "", domain.PhaseDoing)
+	issueID, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 5, "preview test", "", domain.PhaseDoing)
 
 	// Nenhum preview ativo inicialmente.
 	if _, err := s.GetActivePreview(ctx); !errors.Is(err, ErrNotFound) {
@@ -444,7 +444,7 @@ func TestPreviewLifecycle(t *testing.T) {
 	}
 
 	// Criar preview (starting).
-	pid, err := s.CreatePreview(ctx, issueID, domain.RepoWeb, 9000, 9001)
+	pid, err := s.CreatePreview(ctx, issueID, domain.RepoRedeAgenda, 9000, 9001)
 	if err != nil || pid == 0 {
 		t.Fatalf("CreatePreview: id=%d err=%v", pid, err)
 	}
@@ -502,12 +502,12 @@ func TestPreviewLifecycle(t *testing.T) {
 func TestPreviewMarkStaleAndList(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	id1, _ := s.UpsertIssue(ctx, domain.RepoWeb, 11, "a", "", domain.PhaseDoing)
-	id2, _ := s.UpsertIssue(ctx, domain.RepoMobile, 12, "b", "", domain.PhaseDoing)
+	id1, _ := s.UpsertIssue(ctx, domain.RepoRedeAgenda, 11, "a", "", domain.PhaseDoing)
+	id2, _ := s.UpsertIssue(ctx, "other-repo", 12, "b", "", domain.PhaseDoing)
 
 	// Dois previews em estados transitórios simulando crash do Argos.
-	pid1, _ := s.CreatePreview(ctx, id1, domain.RepoWeb, 9000, 0)
-	pid2, _ := s.CreatePreview(ctx, id2, domain.RepoMobile, 9010, 0)
+	pid1, _ := s.CreatePreview(ctx, id1, domain.RepoRedeAgenda, 9000, 0)
+	pid2, _ := s.CreatePreview(ctx, id2, "other-repo", 9010, 0)
 	s.SetPreviewRunning(ctx, pid2, "https://xyz.trycloudflare.com")
 
 	// MarkStalePreviewsDead deve marcar os dois.

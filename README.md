@@ -103,3 +103,40 @@ git pull
 CGO_ENABLED=0 go build -o /usr/local/bin/argos ./cmd/orchestrator
 systemctl restart argos
 ```
+
+# Orientações para configuração do instagram
+
+## Como Cadastrar Webhook no Telegram
+
+Cadastrar um webhook no Telegram é um processo simples. Você só precisa do **token de API do seu bot** e da **URL do seu servidor/aplicação** (que deve obrigatoriamente usar HTTPS). Basta enviar uma requisição HTTP via navegador ou terminal para conectar os dois.
+
+### Passo 1: Obter o Token do Bot
+
+1. Abra o Telegram e procure pelo **[BotFather](https://t.me)**.
+2. Envie o comando `/newbot` e siga as instruções para criar um nome e um usuário.
+3. O **BotFather** fornecerá um **Token de Acesso** (ex: `123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ`). Guarde-o com segurança.
+
+### Passo 2: Cadastrar o Webhook
+
+Abra o seu navegador de internet ou terminal de preferência e acesse a URL abaixo, substituindo os valores pelas suas informações:
+
+```text
+https://telegram.org{SEU_TOKEN}/setWebhook?url={URL_DO_SEU_SERVIDOR}
+```
+
+#### Exemplo prático:
+`https://telegram.org123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ/setWebhook?url=https://meuservidor.com/webhook`
+
+Se a configuração for bem-sucedida, você receberá uma resposta JSON confirmando:
+```json
+{
+  "ok": true,
+  "result": true,
+  "description": "Webhook was set"
+}
+```
+
+### Como Verificar ou Remover o Webhook
+
+* **Verificar status:** Acesse `https://telegram.org{SEU_TOKEN}/getWebhookInfo` no navegador para checar se o webhook está ativo e se há erros de envio.
+* **Remover webhook:** Acesse `https://telegram.org{SEU_TOKEN}/setWebhook?url=` (deixando o campo `url` vazio) para cancelar o envio automático e voltar para o sistema manual de consultas (polling).

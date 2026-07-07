@@ -7,22 +7,21 @@ import (
 
 // DevServerConfig configura o comportamento do DevServer por repo.
 type DevServerConfig struct {
-	// WebBackendEnabled controla se o uvicorn é iniciado para o repo web.
-	// Default true (assume que vite.config.js proxia para o backend Python).
-	// Setar false para repos SPA puro (sem proxy para backend).
-	// Ver docs/specs/sprints/preview-v1.1/context.md §14.1.
-	WebBackendEnabled bool
+	// GoBackendEnabled controla se o servidor Go é iniciado para o repo redeagenda.
+	// Default false — o frontend Flutter conecta direto ao Firebase em preview.
+	GoBackendEnabled bool
 
-	// UvicornApp é o argumento app:factory passado ao uvicorn (ex.: "main:app").
-	// Usado apenas quando WebBackendEnabled=true.
-	UvicornApp string
+	// GoBackendCmd é o binário do backend Go (ex.: "./server").
+	// Recebe --port <extraPort> como argumento adicional.
+	// Usado apenas quando GoBackendEnabled=true.
+	GoBackendCmd string
 }
 
 // DefaultDevServerConfig retorna a config padrão do DevServer.
 func DefaultDevServerConfig() DevServerConfig {
 	return DevServerConfig{
-		WebBackendEnabled: true,
-		UvicornApp:        "main:app",
+		GoBackendEnabled: false,
+		GoBackendCmd:     "./server",
 	}
 }
 
