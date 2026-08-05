@@ -1,0 +1,14 @@
+# Binário do orquestrador
+/orchestrator
+/cmd/orchestrator/orchestrator
+
+# Banco SQLite local e arquivos WAL/SHM
+*.db
+*.db-wal
+*.db-shm
+
+# Config real (segredos referenciados por env; o exemplo é versionado)
+config.yaml
+
+# Sistema
+.DS_Store
